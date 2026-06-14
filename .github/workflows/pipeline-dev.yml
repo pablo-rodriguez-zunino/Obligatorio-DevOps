@@ -5,6 +5,7 @@ on:
     branches: [ "develop", "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   # ETAPA 1: CALIDAD Y SEGURIDAD (Para develop, main y Pull Requests)
