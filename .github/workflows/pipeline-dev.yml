@@ -1,0 +1,139 @@
+name: CI/CD Multi-Environment Pipeline
+
+on:
+  push:
+    branches: [ "develop", "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # ETAPA 1: CALIDAD Y SEGURIDAD (Para develop, main y Pull Requests)
+  security-and-quality:
+    name: Code Quality & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # SCA: Detección de Secretos
+      - name: Secret Detection (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # SAST: Análisis Estático con SonarQube Cloud
+      - name: SonarQube Cloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ETAPA 2: AMBIENTE DEV (Solo cuando cambia develop)
+  deploy-dev:
+    name: Build & Publish to DEV
+    needs: security-and-quality
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker Image
+        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:dev-${{ github.sha }} ./src/cart
+
+      - name: Vulnerability Scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:dev-${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Push Image to Docker Hub
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:dev-${{ github.sha }}
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:dev-${{ github.sha }} ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:dev-latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:dev-latest
+
+  # ETAPA 3: AMBIENTE TEST (Se ejecuta durante el Pull Request a main)
+  deploy-test:
+    name: Build & Publish to TEST
+    needs: security-and-quality
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker Image
+        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:test-${{ github.sha }} ./src/cart
+
+      - name: Vulnerability Scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:test-${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Push Image to Docker Hub
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:test-${{ github.sha }}
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:test-${{ github.sha }} ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:test-latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:test-latest
+
+  # ETAPA 4: AMBIENTE PROD (Solo cuando impacta el push final en main)
+  deploy-prod:
+    name: Build & Publish to PROD
+    needs: security-and-quality
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker Image
+        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:prod-${{ github.sha }} ./src/cart
+
+      - name: Vulnerability Scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:prod-${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Push Image to Docker Hub
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:prod-${{ github.sha }}
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:prod-${{ github.sha }} ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/retailstore-carts:latest
