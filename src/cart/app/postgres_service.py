@@ -1,3 +1,4 @@
+import time
 import psycopg2
 import psycopg2.extras
 from app.models import Item, Cart
@@ -7,14 +8,32 @@ from app.config import settings
 
 class PostgresCartService(CartService):
     def __init__(self):
-        self._conn = psycopg2.connect(
-            host=settings.postgres_host,
-            port=settings.postgres_port,
-            dbname=settings.postgres_db,
-            user=settings.postgres_user,
-            password=settings.postgres_password,
-        )
-        self._conn.autocommit = True
+        max_retries = 10
+        retry_delay = 3  
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"Intentando conectar a PostgreSQL (Intento {attempt}/{max_retries})...", flush=True)
+                
+                self._conn = psycopg2.connect(
+                    host=settings.postgres_host,
+                    port=settings.postgres_port,
+                    dbname=settings.postgres_db,
+                    user=settings.postgres_user,
+                    password=settings.postgres_password,
+                )
+                self._conn.autocommit = True
+                
+                print("¡Conexión exitosa a PostgreSQL!", flush=True)
+                break 
+             
+            except psycopg2.OperationalError as e:
+                if attempt == max_retries:
+                    print("Se agotaron los intentos de conexión. El servicio carts fallará.", flush=True)
+                    raise e  
+                
+                print(f"Base de datos no disponible todavía ({e}). Reintentando en {retry_delay}s...", flush=True)
+                time.sleep(retry_delay)
 
     def get(self, customer_id: str) -> Cart:
         return Cart(customerId=customer_id, items=self.get_items(customer_id))
