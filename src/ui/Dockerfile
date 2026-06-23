@@ -1,3 +1,4 @@
+# === ETAPA 1: Compilación (Builder) ===
 FROM node:22-alpine AS builder
 
 WORKDIR /app
@@ -12,6 +13,8 @@ RUN npm run build
 
 RUN npm prune --production
 
+
+# === ETAPA 2: Producción (Imagen final ligera y segura) ===
 FROM node:22-alpine
 
 WORKDIR /app
@@ -24,6 +27,11 @@ COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/dist ./dist
 COPY --from=builder --chown=node:node /app/public ./public
 
+# Cambiamos temporalmente a root para actualizar el npm global de la imagen base
+USER root
+RUN npm install -g npm@latest
+
+# Volvemos al usuario seguro de la aplicación
 USER node
 
 EXPOSE 8080
