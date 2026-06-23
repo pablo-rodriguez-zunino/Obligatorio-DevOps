@@ -83,15 +83,6 @@ resource "aws_route_table_association" "public_2" {
   route_table_id = aws_route_table.public.id
 }
 
-# 6. Espacio de Nombres Privado (Service Discovery)
-# ¡ESTO REEMPLAZA EL COMPORTAMIENTO DE DOCKER COMPOSE!
-# Creará un DNS interno para que 'cart' pueda llamar a 'http://db.local:5432'
-resource "aws_service_discovery_private_dns_namespace" "internal" {
-  name        = "local"
-  description = "DNS privado para microservicios retail store"
-  vpc         = aws_vpc.main.id
-}
-
 # --- OUTPUTS (Para que el resto de los módulos puedan leer estos datos) ---
 output "vpc_id" {
   value = aws_vpc.main.id
