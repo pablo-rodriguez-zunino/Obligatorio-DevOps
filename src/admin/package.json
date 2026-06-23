@@ -18,5 +18,8 @@
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.6",
     "typescript": "^5.5.4"
+  },
+  "overrides": {
+    "picomatch": "4.0.4"
   }
 }
