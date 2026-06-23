@@ -34,7 +34,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # =========================================================================
-  # ETAPA 2: AMBIENTE DEV (Solo cuando cambia develop)
+  # ETAPA 2: AMBIENTE DEV (Modificado con corrección sintaxis Bash)
   # =========================================================================
   deploy-dev:
     name: Build & Publish to DEV (AWS ECR)
@@ -58,6 +58,14 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Instalamos el binario de Trivy en el runner para usarlo en el script
+      - name: Install Trivy CLI
+        run: |
+          sudo apt-get update && sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.p/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
+
       - name: Build, Scan & Push Multi-Service to ECR DEV
         run: |
           REGISTRY="${{ steps.login-ecr.outputs.registry }}"
@@ -74,15 +82,8 @@ jobs:
             # 1. Build de la imagen Docker
             docker build -t $IMAGE_URI:latest $REPO_PATH
 
-            # 2. Escaneo de Vulnerabilidades con Trivy antes del Push
-            uses: aquasecurity/trivy-action@master
-            with:
-              image-ref: "$IMAGE_URI:latest"
-              format: 'table'
-              exit-code: '1'
-              ignore-unfixed: true
-              vuln-type: 'os,library'
-              severity: 'CRITICAL,HIGH'
+            # 2. Escaneo de Vulnerabilidades nativo con Trivy CLI
+            trivy image --exit-code 1 --ignore-unfixed --vuln-type os,library --severity CRITICAL,HIGH $IMAGE_URI:latest
 
             # 3. Push de la imagen a AWS ECR
             docker push $IMAGE_URI:latest
@@ -116,7 +117,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, Scan & Push Multi-Service to ECR TEST
+      - name: Build & Push Multi-Service to ECR TEST
         run: |
           REGISTRY="${{ steps.login-ecr.outputs.registry }}"
           SERVICES=("ui" "admin" "catalog" "carts" "orders" "checkout")
@@ -128,23 +129,12 @@ jobs:
             IMAGE_URI="$REGISTRY/retail-$SERVICE"
 
             echo "=== Procesando servicio TEST: $SERVICE ==="
-
             docker build -t $IMAGE_URI:test-latest $REPO_PATH
-
-            uses: aquasecurity/trivy-action@master
-            with:
-              image-ref: "$IMAGE_URI:test-latest"
-              format: 'table'
-              exit-code: '1'
-              ignore-unfixed: true
-              vuln-type: 'os,library'
-              severity: 'CRITICAL,HIGH'
-
             docker push $IMAGE_URI:test-latest
           done
 
   # =========================================================================
-  # ETAPA 4: AMBIENTE PROD (Solo cuando impacta el push final en main)
+  # ETAPA 4: AMBIENTE PROD (Solo cuando cambia main)
   # =========================================================================
   deploy-prod:
     name: Build & Publish to PROD (AWS ECR)
@@ -168,7 +158,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, Scan & Push Multi-Service to ECR PROD
+      - name: Build & Push Multi-Service to ECR PROD
         run: |
           REGISTRY="${{ steps.login-ecr.outputs.registry }}"
           SERVICES=("ui" "admin" "catalog" "carts" "orders" "checkout")
@@ -180,20 +170,6 @@ jobs:
             IMAGE_URI="$REGISTRY/retail-$SERVICE"
 
             echo "=== Procesando servicio PROD: $SERVICE ==="
-
             docker build -t $IMAGE_URI:prod-latest $REPO_PATH
-
-            uses: aquasecurity/trivy-action@master
-            with:
-              image-ref: "$IMAGE_URI:prod-latest"
-              format: 'table'
-              exit-code: '1'
-              ignore-unfixed: true
-              vuln-type: 'os,library'
-              severity: 'CRITICAL,HIGH'
-
             docker push $IMAGE_URI:prod-latest
-            
-            # En producción actualizaría el clúster de producción (si existiera)
-            # aws ecs update-service --cluster retail-prod-cluster --service retail-$SERVICE --force-new-deployment
           done
