@@ -1,13 +1,18 @@
 # === ETAPA 1: Compilación (Builder) ===
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-COPY go.mod go.sum ./
-RUN go mod download
+# Instalamos git por si alguna dependencia lo requiere
+RUN apk add --no-cache git
 
-COPY main.go ./
+# 1. Copiamos todo el código fuente primero
+COPY . .
 
+# 2. Reconstruimos el go.sum con las firmas de pgx v5.9.0 usando el código presente
+RUN go mod tidy
+
+# 3. Compilamos el binario de forma segura
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o orders-app .
 
 
