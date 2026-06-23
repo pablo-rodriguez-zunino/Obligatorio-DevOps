@@ -1,0 +1,61 @@
+name: Terraform Infrastructure
+
+on:
+  push:
+    branches: [ "develop", "main" ]
+    paths:
+      - 'terraform/**' # ◄── SÓLO corre si editas la carpeta de Terraform
+  workflow_dispatch:
+
+jobs:
+  terraform:
+    name: Terraform Plan & Apply
+    runs-on: ubuntu-latest
+    
+    # Determinar qué entorno usar según la rama
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. Configurar Credenciales de AWS Academy (Temporales)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      # 2. Instalar Terraform en el servidor de GitHub
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.7
+
+      # 3. Inicializar Backend (Lee el bucket S3 que creaste a mano)
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init
+
+      # 4. Verificar formato y validar código
+      - name: Terraform Validate
+        run: |
+          cd terraform
+          terraform validate
+
+      # 5. Plan (Muestra en los logs de GitHub qué va a crear en AWS)
+      - name: Terraform Plan
+        run: |
+          cd terraform
+          terraform plan -var-file="terraform.tfvars"
+
+      # 6. Apply (Solo lo ejecuta de verdad si estás en la rama principal)
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+        run: |
+          cd terraform
+          terraform apply -auto-approve -var-file="terraform.tfvars"
