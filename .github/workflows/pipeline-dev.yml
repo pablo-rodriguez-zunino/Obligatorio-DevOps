@@ -34,14 +34,30 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # =========================================================================
-  # ETAPA 2: AMBIENTE DEV (Modificado con corrección sintaxis Bash)
+  # ETAPA 2: AMBIENTE DEV (Estrategia Matrix en Paralelo)
   # =========================================================================
   deploy-dev:
-    name: Build & Publish to DEV (AWS ECR)
+    name: Build & Publish DEV (${{ matrix.service }})
     needs: security-and-quality
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     environment: dev
+    strategy:
+      matrix:
+        # Definimos los pares de (servicio, ruta) para mapear todo ordenado
+        include:
+          - service: "ui"
+            path: "./src/ui"
+          - service: "admin"
+            path: "./src/admin"
+          - service: "catalog"
+            path: "./src/catalog"
+          - service: "carts"
+            path: "./src/cart" # Ojo: mapea la carpeta /cart
+          - service: "orders"
+            path: "./src/orders"
+          - service: "checkout"
+            path: "./src/checkout"
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -58,118 +74,29 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Instalamos el binario de Trivy en el runner para usarlo en el script
-      - name: Install Trivy CLI
+      # 1. Build de la imagen del servicio actual de la matriz
+      - name: Build Docker Image
         run: |
-          sudo apt-get update && sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.p/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/retail-${{ matrix.service }}:latest"
+          docker build -t $IMAGE_URI ${{ matrix.path }}
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
-      - name: Build, Scan & Push Multi-Service to ECR DEV
-        run: |
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          SERVICES=("ui" "admin" "catalog" "carts" "orders" "checkout")
-          PATHS=("./src/ui" "./src/admin" "./src/catalog" "./src/cart" "./src/orders" "./src/checkout")
-
-          for i in "${!SERVICES[@]}"; do
-            SERVICE="${SERVICES[$i]}"
-            REPO_PATH="${PATHS[$i]}"
-            IMAGE_URI="$REGISTRY/retail-$SERVICE"
-
-            echo "=== Procesando servicio DEV: $SERVICE ==="
-
-            # 1. Build de la imagen Docker
-            docker build -t $IMAGE_URI:latest $REPO_PATH
-
-            # 2. Escaneo de Vulnerabilidades nativo con Trivy CLI
-            trivy image --exit-code 1 --ignore-unfixed --vuln-type os,library --severity CRITICAL,HIGH $IMAGE_URI:latest
-
-            # 3. Push de la imagen a AWS ECR
-            docker push $IMAGE_URI:latest
-            
-            # 4. Forzar despliegue para limpiar el 503
-            aws ecs update-service --cluster retail-dev-cluster --service retail-$SERVICE --force-new-deployment
-          done
-
-  # =========================================================================
-  # ETAPA 3: AMBIENTE TEST (Se ejecuta durante el Pull Request a main)
-  # =========================================================================
-  deploy-test:
-    name: Build & Publish to TEST (AWS ECR)
-    needs: security-and-quality
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    runs-on: ubuntu-latest
-    environment: test
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      # 2. Escaneo de vulnerabilidades nativo usando la ACCIÓN oficial (sin instalar nada)
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@master
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
+          image-ref: ${{ env.IMAGE_URI }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      # 3. Push a ECR si el scanner dio verde
+      - name: Push Image to Amazon ECR
+        run: docker push ${{ env.IMAGE_URI }}
 
-      - name: Build & Push Multi-Service to ECR TEST
+      # 4. Refrescar el servicio en ECS Fargate
+      - name: Force ECS Deployment
         run: |
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          SERVICES=("ui" "admin" "catalog" "carts" "orders" "checkout")
-          PATHS=("./src/ui" "./src/admin" "./src/catalog" "./src/cart" "./src/orders" "./src/checkout")
-
-          for i in "${!SERVICES[@]}"; do
-            SERVICE="${SERVICES[$i]}"
-            REPO_PATH="${PATHS[$i]}"
-            IMAGE_URI="$REGISTRY/retail-$SERVICE"
-
-            echo "=== Procesando servicio TEST: $SERVICE ==="
-            docker build -t $IMAGE_URI:test-latest $REPO_PATH
-            docker push $IMAGE_URI:test-latest
-          done
-
-  # =========================================================================
-  # ETAPA 4: AMBIENTE PROD (Solo cuando cambia main)
-  # =========================================================================
-  deploy-prod:
-    name: Build & Publish to PROD (AWS ECR)
-    needs: security-and-quality
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: prod
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build & Push Multi-Service to ECR PROD
-        run: |
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          SERVICES=("ui" "admin" "catalog" "carts" "orders" "checkout")
-          PATHS=("./src/ui" "./src/admin" "./src/catalog" "./src/cart" "./src/orders" "./src/checkout")
-
-          for i in "${!SERVICES[@]}"; do
-            SERVICE="${SERVICES[$i]}"
-            REPO_PATH="${PATHS[$i]}"
-            IMAGE_URI="$REGISTRY/retail-$SERVICE"
-
-            echo "=== Procesando servicio PROD: $SERVICE ==="
-            docker build -t $IMAGE_URI:prod-latest $REPO_PATH
-            docker push $IMAGE_URI:prod-latest
-          done
+          aws ecs update-service --cluster retail-dev-cluster --service retail-${{ matrix.service }} --force-new-deployment
