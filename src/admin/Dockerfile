@@ -27,6 +27,10 @@ COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/dist ./dist
 COPY --from=builder --chown=node:node /app/public ./public
 
+# ◄ ADICIÓN: Entramos como root para actualizar el npm de la imagen base y luego volvemos al usuario seguro
+USER root
+RUN npm install -g npm@latest
+
 USER node
 
 EXPOSE 8080
