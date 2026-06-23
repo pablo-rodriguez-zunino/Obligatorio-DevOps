@@ -95,7 +95,3 @@ output "public_subnets" {
 output "private_subnet_id" {
   value = aws_subnet.private.id
 }
-
-output "dns_namespace_id" {
-  value = aws_service_discovery_private_dns_namespace.internal.id
-}
