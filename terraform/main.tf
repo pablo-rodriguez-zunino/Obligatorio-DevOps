@@ -26,3 +26,17 @@ module "networking" {
 module "ecr" {
   source = "./modules/ecr"
 }
+# ◄ ADICIÓN: Conectamos el módulo de aplicaciones con la red y el ECR
+module "apps" {
+  source            = "./modules/apps"
+  environment       = var.environment
+  vpc_id            = module.networking.vpc_id
+  public_subnets    = module.networking.public_subnets
+  private_subnet_id = module.networking.private_subnet_id
+  repository_urls   = module.ecr.repository_urls
+}
+
+output "url_de_la_tienda" {
+  value       = "http://${module.apps.alb_dns_name}"
+  description = "Ingresa a esta URL para ver el RetailStore corriendo"
+}
