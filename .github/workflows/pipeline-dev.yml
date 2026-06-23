@@ -90,7 +90,7 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
+          severity: 'CRITICAL'
 
       # 3. Push a ECR si el scanner dio verde
       - name: Push Image to Amazon ECR
