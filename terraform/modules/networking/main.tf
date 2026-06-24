@@ -26,7 +26,6 @@ resource "aws_subnet" "public_1" {
   }
 }
 
-# AWS exige al menos DOS subredes en distintas AZ para el Balanceador
 resource "aws_subnet" "public_2" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.2.0/24"
@@ -38,7 +37,7 @@ resource "aws_subnet" "public_2" {
   }
 }
 
-# 3. Crear una Subred Privada (Para los 8 Contenedores / Microservicios)
+# 3. Crear una Subred Privada (Para los Contenedores)
 resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.0.3.0/24"
@@ -83,7 +82,67 @@ resource "aws_route_table_association" "public_2" {
   route_table_id = aws_route_table.public.id
 }
 
-# --- OUTPUTS (Para que el resto de los módulos puedan leer estos datos) ---
+
+# ==========================================
+# ◄ ADICIÓN: Seguridad y Conectividad Privada (VPC Endpoints)
+# ==========================================
+
+# Grupo de seguridad interno para permitir el tráfico hacia los Endpoints en el puerto 443
+resource "aws_security_group" "vpc_endpoints" {
+  name        = "retail-${var.environment}-endpoints-sg"
+  description = "Permitir trafico HTTPS interno hacia los servicios de AWS"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Endpoint para ECR API (Autenticación)
+resource "aws_vpc_endpoint" "ecr_api" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.us-east-1.ecr.api"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = { Name = "retail-${var.environment}-ecr-api-vpce" }
+}
+
+# Endpoint para ECR DKR (Descarga de imágenes/capas de Docker)
+resource "aws_vpc_endpoint" "ecr_dkr" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.us-east-1.ecr.dkr"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private.id]
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = { Name = "retail-${var.environment}-ecr-dkr-vpce" }
+}
+
+# Endpoint de tipo Gateway para S3 (ECR guarda los archivos binarios reales en S3)
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.us-east-1.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_vpc.main.default_route_table_id]
+
+  tags = { Name = "retail-${var.environment}-s3-vpce" }
+}
+
+# --- OUTPUTS ---
 output "vpc_id" {
   value = aws_vpc.main.id
 }
