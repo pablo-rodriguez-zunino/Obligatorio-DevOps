@@ -23,7 +23,7 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# 3. Grupo de Seguridad para los Contenedores ECS (Solo permite tráfico DESDE el ALB)
+# 3. Grupo de Seguridad para los Contenedores ECS (Permite tráfico DESDE el ALB)
 resource "aws_security_group" "ecs_tasks" {
   name        = "retail-${var.environment}-ecs-tasks-sg"
   vpc_id      = var.vpc_id
@@ -55,8 +55,8 @@ resource "aws_lb" "main" {
 # 5. Crear el Listener del ALB en el puerto 80 (Por defecto envía todo a la UI)
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
-  port              = "80"
-  protocol          = "HTTP"
+  port               = "80"
+  protocol           = "HTTP"
 
   default_action {
     type             = "forward"
@@ -64,17 +64,20 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# 6. Crear un Target Group por cada servicio
+# 6. Crear un Target Group por cada servicio mapeando sus puertos reales
 resource "aws_lb_target_group" "targets" {
   for_each    = toset(var.services)
   name        = "tg-${each.value}"
-  port        = 80
+  
+  # CORRECCIÓN: admin corre en el 8081, el resto en el 8080
+  port        = each.value == "admin" ? 8081 : 8080
   protocol    = "HTTP"
   vpc_id      = var.vpc_id
   target_type = "ip"
 
   health_check {
-    path                = each.value == "ui" ? "/" : "/actuator/health" # Ajustable según el framework
+    # CORRECCIÓN: Paths nativos de salud para Go, Python y NestJS
+    path                = each.value == "ui" ? "/" : "/health"
     healthy_threshold   = 3
     unhealthy_threshold = 3
     timeout             = 5
@@ -85,7 +88,7 @@ resource "aws_lb_target_group" "targets" {
 
 # 7. Crear las reglas de ruteo en el ALB para derivar tráfico por URL path
 resource "aws_lb_listener_rule" "routing" {
-  for_each     = toset([for s in var.services : s if s != "ui"]) # Reglas para todos menos para la UI (que es el default)
+  for_each     = toset([for s in var.services : s if s != "ui"])
   listener_arn = aws_lb_listener.http.arn
   priority     = index(var.services, each.value) + 10
 
@@ -102,42 +105,49 @@ resource "aws_lb_listener_rule" "routing" {
 }
 
 # 8. Definición de Tareas y Servicios de ECS Fargate
-# 8. Definición de Tareas y Servicios de ECS Fargate (Con Recursos Parametrizados)
 resource "aws_ecs_task_definition" "app" {
   for_each                 = toset(var.services)
   family                   = "retail-${each.value}"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
 
-  # Asignación dinámica de CPU y Memoria para evitar OOM (Código 137)
+  # Optimización paramétrica de recursos
   cpu    = (each.value == "admin" || each.value == "checkout") ? "512" : "256"
   memory = (each.value == "admin" || each.value == "checkout") ? "1024" : "512"
 
-  # Rol de ejecución por defecto de AWS Academy Lab (LabRole)
   execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
   task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
 
   container_definitions = jsonencode([
     {
       name      = "retail-${each.value}"
-      image     = "${var.repository_urls[each.value]}:latest" # Apunta a tu ECR
+      image     = "${var.repository_urls[each.value]}:latest"
       essential = true
       portMappings = [
         {
-          containerPort = 80
-          hostPort      = 80
+          # CORRECCIÓN: Los contenedores abren sus puertos verdaderos del README
+          containerPort = each.value == "admin" ? 8081 : 8080
+          hostPort      = each.value == "admin" ? 8081 : 8080
         }
       ]
       
-      # Añadimos un límite blando de memoria interna en la definición del contenedor
       memoryReservation = (each.value == "admin" || each.value == "checkout") ? 768 : 256
 
-      # Inyección de endpoints dinámicos usando el DNS del ALB para evitar el Service Discovery
+      # CORRECCIÓN: Nombres exactos de variables del README
       environment = [
-        { name = "CARTS_ENDPOINT", value = "http://${aws_lb.main.dns_name}/api/carts" },
-        { name = "CATALOG_ENDPOINT", value = "http://${aws_lb.main.dns_name}/api/catalog" },
-        { name = "ORDERS_ENDPOINT", value = "http://${aws_lb.main.dns_name}/api/orders" },
-        { name = "CHECKOUT_ENDPOINT", value = "http://${aws_lb.main.dns_name}/api/checkout" }
+        # Variables requeridas por la UI
+        { name = "RETAIL_UI_ENDPOINTS_CATALOG", value = "http://${aws_lb.main.dns_name}/api/catalog" },
+        { name = "RETAIL_UI_ENDPOINTS_CARTS", value = "http://${aws_lb.main.dns_name}/api/carts" },
+        { name = "RETAIL_UI_ENDPOINTS_CHECKOUT", value = "http://${aws_lb.main.dns_name}/api/checkout" },
+        { name = "RETAIL_UI_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" },
+        
+        # Variables requeridas por el Checkout
+        { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" },
+        { name = "RETAIL_CHECKOUT_PERSISTENCE_PROVIDER", value = "redis" },
+        
+        # Variables base comunes para persistencia de datos (Apunta local o a tu capa DB si corresponde)
+        { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
+        { name = "DB_PASSWORD", value = "retailpassword" }
       ]
     }
   ])
@@ -154,19 +164,19 @@ resource "aws_ecs_service" "app" {
   network_configuration {
     subnets          = [var.private_subnet_id]
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true # Requerido si no hay NAT Gateway para descargar la imagen desde ECR
+    assign_public_ip = true
   }
 
   load_balancer {
     target_group_arn = aws_lb_target_group.targets[each.value].arn
     container_name   = "retail-${each.value}"
-    container_port   = 80
+    # CORRECCIÓN: El balanceador se acopla dinámicamente al puerto correcto de cada contenedor
+    container_port   = each.value == "admin" ? 8081 : 8080
   }
 
   depends_on = [aws_lb_listener.http]
 }
 
-# OUTPUT: Nos devuelve la URL pública para entrar a probar la app en el navegador
 output "alb_dns_name" {
   value = aws_lb.main.dns_name
 }
