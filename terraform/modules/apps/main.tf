@@ -102,13 +102,17 @@ resource "aws_lb_listener_rule" "routing" {
 }
 
 # 8. Definición de Tareas y Servicios de ECS Fargate
+# 8. Definición de Tareas y Servicios de ECS Fargate (Con Recursos Parametrizados)
 resource "aws_ecs_task_definition" "app" {
   for_each                 = toset(var.services)
   family                   = "retail-${each.value}"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
+
+  # Asignación dinámica de CPU y Memoria para evitar OOM (Código 137)
+  cpu    = (each.value == "admin" || each.value == "checkout") ? "512" : "256"
+  memory = (each.value == "admin" || each.value == "checkout") ? "1024" : "512"
+
   # Rol de ejecución por defecto de AWS Academy Lab (LabRole)
   execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
   task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
@@ -124,6 +128,10 @@ resource "aws_ecs_task_definition" "app" {
           hostPort      = 80
         }
       ]
+      
+      # Añadimos un límite blando de memoria interna en la definición del contenedor
+      memoryReservation = (each.value == "admin" || each.value == "checkout") ? 768 : 256
+
       # Inyección de endpoints dinámicos usando el DNS del ALB para evitar el Service Discovery
       environment = [
         { name = "CARTS_ENDPOINT", value = "http://${aws_lb.main.dns_name}/api/carts" },
