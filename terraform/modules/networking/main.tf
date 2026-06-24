@@ -82,12 +82,26 @@ resource "aws_route_table_association" "public_2" {
   route_table_id = aws_route_table.public.id
 }
 
-
 # ==========================================
-# ◄ ADICIÓN: Seguridad y Conectividad Privada (VPC Endpoints)
+# ◄ CORRECCIÓN: Ruteo explícito para la Subred Privada y Endpoints
 # ==========================================
 
-# Grupo de seguridad interno para permitir el tráfico hacia los Endpoints en el puerto 443
+# 1. Creamos una tabla de ruteo exclusiva para la subred privada
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "retail-${var.environment}-private-rt"
+  }
+}
+
+# 2. Asociamos la subred privada a su tabla de ruteo
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
+}
+
+# 3. Grupo de seguridad interno para los Endpoints
 resource "aws_security_group" "vpc_endpoints" {
   name        = "retail-${var.environment}-endpoints-sg"
   description = "Permitir trafico HTTPS interno hacia los servicios de AWS"
@@ -120,7 +134,7 @@ resource "aws_vpc_endpoint" "ecr_api" {
   tags = { Name = "retail-${var.environment}-ecr-api-vpce" }
 }
 
-# Endpoint para ECR DKR (Descarga de imágenes/capas de Docker)
+# Endpoint para ECR DKR (Descarga de imágenes)
 resource "aws_vpc_endpoint" "ecr_dkr" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.us-east-1.ecr.dkr"
@@ -132,12 +146,12 @@ resource "aws_vpc_endpoint" "ecr_dkr" {
   tags = { Name = "retail-${var.environment}-ecr-dkr-vpce" }
 }
 
-# Endpoint de tipo Gateway para S3 (ECR guarda los archivos binarios reales en S3)
+# Endpoint de tipo Gateway para S3 (Asociado a AMBAS tablas de ruteo)
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.us-east-1.s3"
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_vpc.main.default_route_table_id]
+  route_table_ids   = [aws_route_table.public.id, aws_route_table.private.id]
 
   tags = { Name = "retail-${var.environment}-s3-vpce" }
 }
