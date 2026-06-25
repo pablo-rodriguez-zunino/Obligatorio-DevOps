@@ -1,6 +1,6 @@
 variable "services" {
   type    = list(string)
-  default = ["ui", "admin", "catalog", "carts", "orders", "checkout"]
+  default = ["ui", "admin", "catalog", "carts", "orders", "checkout", "db"]
 }
 
 resource "aws_ecr_repository" "repos" {
