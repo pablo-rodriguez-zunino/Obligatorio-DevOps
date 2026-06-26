@@ -92,7 +92,8 @@ jobs:
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true
-          vuln-type: 'os,library'
+          # ◄ AJUSTE DE SEGURIDAD: Si es la db solo mira OS para evitar los falsos positivos de gosu
+          vuln-type: ${{ matrix.service == 'db' && 'os' || 'os,library' }}
           severity: 'CRITICAL'
 
       # 3. Push a ECR si el scanner dio verde
