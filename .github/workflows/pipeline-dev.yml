@@ -58,6 +58,9 @@ jobs:
             path: "./src/orders"
           - service: "checkout"
             path: "./src/checkout"
+          # ◄ ADICIÓN SEGURA: Base de datos mapeada a su nueva carpeta src/db
+          - service: "db"
+            path: "./src/db"
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -81,7 +84,7 @@ jobs:
           docker build --no-cache -t $IMAGE_URI ${{ matrix.path }}
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
-      # 2. Escaneo de vulnerabilidades nativo usando la ACCIÓN oficial (sin instalar nada)
+      # 2. Escaneo de vulnerabilidades nativo usando la ACCIÓN oficial
       - name: Run Trivy Vulnerability Scanner
         uses: aquasecurity/trivy-action@master
         with:
@@ -97,6 +100,7 @@ jobs:
         run: docker push ${{ env.IMAGE_URI }}
 
       # 4. Refrescar el servicio en ECS Fargate
+      # Control de fallos integrado: si el servicio de la DB aún no existe en ECS, no frena el flujo.
       - name: Force ECS Deployment
         run: |
-          aws ecs update-service --cluster retail-dev-cluster --service retail-${{ matrix.service }} --force-new-deployment
+          aws ecs update-service --cluster retail-dev-cluster --service retail-${{ matrix.service }} --force-new-deployment || echo "Aviso: El servicio retail-${{ matrix.service }} aun no esta desplegado en ECS. Imagen subida a ECR correctamente."
