@@ -1,6 +1,12 @@
-# 1. Crear el Clúster de ECS
+# 1. Crear el Clúster de ECS con Service Connect activado
 resource "aws_ecs_cluster" "main" {
   name = "retail-${var.environment}-cluster"
+}
+
+# Crear el Namespace de Cloud Map para Service Connect (Comunicación interna transparente)
+resource "aws_service_discovery_http_namespace" "main" {
+  name        = "retail.internal"
+  description = "Namespace para intercomunicacion de microservicios"
 }
 
 # 2. Grupo de Seguridad para el ALB (Permite tráfico de Internet al puerto 80)
@@ -23,7 +29,7 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# 3. Grupo de Seguridad para los Contenedores ECS (Permite tráfico DESDE el ALB e intercomunicación interna)
+# 3. Grupo de Seguridad para los Contenedores ECS
 resource "aws_security_group" "ecs_tasks" {
   name        = "retail-${var.environment}-ecs-tasks-sg"
   vpc_id      = var.vpc_id
@@ -35,7 +41,6 @@ resource "aws_security_group" "ecs_tasks" {
     security_groups = [aws_security_group.alb.id]
   }
 
-  # Permitir tráfico entre las mismas tareas de ECS para conectar DB y Redis internamente
   ingress {
     from_port = 0
     to_port   = 0
@@ -60,7 +65,7 @@ resource "aws_lb" "main" {
   subnets            = var.public_subnets
 }
 
-# 5. Crear el Listener del ALB en el puerto 80 (Por defecto envía todo a la UI)
+# 5. Crear el Listener del ALB en el puerto 80
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port               = "80"
@@ -76,7 +81,6 @@ resource "aws_lb_listener" "http" {
 resource "aws_lb_target_group" "targets" {
   for_each    = toset(var.services)
   name        = "tg-${each.value}"
-  
   port        = each.value == "admin" ? 8081 : 8080
   protocol    = "HTTP"
   vpc_id      = var.vpc_id
@@ -92,7 +96,7 @@ resource "aws_lb_target_group" "targets" {
   }
 }
 
-# 7. Crear las reglas de ruteo en el ALB para derivar tráfico por URL path
+# 7. Reglas de ruteo en el ALB
 resource "aws_lb_listener_rule" "routing" {
   for_each     = toset([for s in var.services : s if s != "ui"])
   listener_arn = aws_lb_listener.http.arn
@@ -110,7 +114,7 @@ resource "aws_lb_listener_rule" "routing" {
   }
 }
 
-# 8. Definición de Tareas y Servicios de ECS Fargate para las Apps Web
+# 8. Definición de Tareas y Servicios de ECS Fargate para las Apps
 resource "aws_ecs_task_definition" "app" {
   for_each                 = toset(var.services)
   family                   = "retail-${each.value}"
@@ -128,12 +132,11 @@ resource "aws_ecs_task_definition" "app" {
       essential = true
       portMappings = [
         {
+          name          = each.value
           containerPort = each.value == "admin" ? 8081 : 8080
           hostPort      = each.value == "admin" ? 8081 : 8080
         }
       ]
-      
-      memoryReservation = (each.value == "admin" || each.value == "checkout") ? 768 : 256
 
       environment = [
         { name = "RETAIL_UI_ENDPOINTS_CATALOG", value = "http://${aws_lb.main.dns_name}/api/catalog" },
@@ -142,21 +145,25 @@ resource "aws_ecs_task_definition" "app" {
         { name = "RETAIL_UI_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" },
         
         { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" },
-        { name = "RETAIL_CHECKOUT_PERSISTENCE_PROVIDER", value = "redis" },
-        { name = "RETAIL_CHECKOUT_REDIS_ADDRESS", value = "retail-redis.local:6379" },
-
-        { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "RETAIL_CATALOG_POSTGRES_ADDRESS", value = "retail-db.local:5432" },
-        { name = "RETAIL_CATALOG_POSTGRES_DATABASE", value = "retail" },
-        { name = "RETAIL_CATALOG_POSTGRES_USERNAME", value = "retailuser" },
-        { name = "RETAIL_CATALOG_POSTGRES_PASSWORD", value = var.db_password },
-
-        { name = "RETAIL_ORDERS_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "RETAIL_ORDERS_POSTGRES_ADDRESS", value = "retail-db.local:5432" },
-        { name = "RETAIL_ORDERS_POSTGRES_DATABASE", value = "retail" },
-        { name = "RETAIL_ORDERS_POSTGRES_USERNAME", value = "retailuser" },
-        { name = "RETAIL_ORDERS_POSTGRES_PASSWORD", value = var.db_password },
         
+        # AJUSTE FIJO REDIS (Según tu configuration.ts)
+        { name = "RETAIL_CHECKOUT_PERSISTENCE_PROVIDER", value = "redis" },
+        { name = "RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL", value = "redis://retail-redis.retail.internal:6379" },
+
+        # AJUSTE FIJO CATALOGO (Según tu config.go)
+        { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "retail-db.retail.internal:5432" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_DB_NAME", value = "retail" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_USER", value = "retailuser" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_PASSWORD", value = var.db_password },
+
+        # AJUSTE FIJO ORDERS (Mismo patrón de Go)
+        { name = "RETAIL_ORDERS_PERSISTENCE_PROVIDER", value = "postgres" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_ENDPOINT", value = "retail-db.retail.internal:5432" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_DB_NAME", value = "retail" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_USER", value = "retailuser" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_PASSWORD", value = var.db_password },
+
         { name = "DB_PASSWORD", value = var.db_password }
       ]
     }
@@ -183,11 +190,17 @@ resource "aws_ecs_service" "app" {
     container_port   = each.value == "admin" ? 8081 : 8080
   }
 
+  # Service Connect mapea el tráfico HTTP interno automáticamente
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_http_namespace.main.arn
+  }
+
   depends_on = [aws_lb_listener.http]
 }
 
 # =========================================================================
-# CAPA DE PERSISTENCIA: RETAIL-DB (PostgreSQL)
+# PERSISTENCIA: RETAIL-DB (PostgreSQL)
 # =========================================================================
 resource "aws_ecs_task_definition" "db" {
   family                   = "retail-db"
@@ -205,6 +218,7 @@ resource "aws_ecs_task_definition" "db" {
       essential = true
       portMappings = [
         {
+          name          = "postgres"
           containerPort = 5432
           hostPort      = 5432
         }
@@ -230,10 +244,19 @@ resource "aws_ecs_service" "db" {
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = true
   }
+
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_http_namespace.main.arn
+    client_alias {
+      dns_name = "retail-db.retail.internal"
+      port     = 5432
+    }
+  }
 }
 
 # =========================================================================
-# CAPA DE PERSISTENCIA: RETAIL-REDIS
+# PERSISTENCIA: RETAIL-REDIS
 # =========================================================================
 resource "aws_ecs_task_definition" "redis" {
   family                   = "retail-redis"
@@ -251,6 +274,7 @@ resource "aws_ecs_task_definition" "redis" {
       essential = true
       portMappings = [
         {
+          name          = "redis"
           containerPort = 6379
           hostPort      = 6379
         }
@@ -271,8 +295,13 @@ resource "aws_ecs_service" "redis" {
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = true
   }
-}
 
-output "alb_dns_name" {
-  value = aws_lb.main.dns_name
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_http_namespace.main.arn
+    client_alias {
+      dns_name = "retail-redis.retail.internal"
+      port     = 6379
+    }
+  }
 }
