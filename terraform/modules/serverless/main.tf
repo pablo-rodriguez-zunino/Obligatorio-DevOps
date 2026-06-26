@@ -1,28 +1,35 @@
-# 1. Definición de la Función Lambda
+# 1. Generar el archivo index.py dinámicamente
+resource "local_file" "lambda_code" {
+  filename = "${path.module}/index.py"
+  content  = <<EOT
+def lambda_handler(event, context):
+    print("--- ALERTA RECIBIDA POR SERVERLESS ---")
+    print(event)
+    return {"status": "logged"}
+EOT
+}
+
+# 2. Crear el archivo ZIP de forma nativa con Terraform (Funciona en cualquier Pipeline)
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_file = local_file.lambda_code.filename
+  output_path = "${path.module}/dummy_payload.zip"
+}
+
+# 3. Definición de la Función Lambda
 resource "aws_lambda_function" "alerts_processor" {
   function_name = "${var.app_name}-sns-logger-${var.environment}"
-  
-  # Usamos el LabRole de la cuenta de estudiante (el mismo de tus tareas de ECS)
   role          = "arn:aws:iam::914465196685:role/LabRole"
   handler       = "index.lambda_handler"
   runtime       = "python3.11"
   timeout       = 10
 
-  # Código de la función inline para no lidiar con archivos zip externos en el pipeline
-  filename      = "${path.module}/dummy_payload.zip"
-  # Truco para que Terraform cree un zip básico temporal si no existe
-  depends_on    = [null_resource.zip_generation]
+  # Apuntamos al ZIP generado nativamente
+  filename         = data.archive_file.lambda_zip.output_path
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
 }
 
-# Generador del paquete zip básico para Python inline
-resource "null_resource" "zip_generation" {
-  provisioner "local-exec" {
-    command = "echo 'def lambda_handler(event, context): print(\"--- ALERTA RECIBIDA POR SERVERLESS ---\"); print(event); return {\"status\": \"logged\"}' > index.py && zip dummy_payload.zip index.py"
-    interpreter = ["sh", "-c"] # Cambiar por ["cmd", "/c"] si usás Windows puro sin Git Bash, pero en Git Bash corre directo
-  }
-}
-
-# 2. Permiso para que SNS pueda ejecutar tu Lambda
+# 4. Permiso para que SNS pueda ejecutar tu Lambda
 resource "aws_lambda_permission" "allow_sns" {
   statement_id  = "AllowExecutionFromSNS"
   action        = "lambda:InvokeFunction"
@@ -31,7 +38,7 @@ resource "aws_lambda_permission" "allow_sns" {
   source_arn    = var.sns_topic_arn
 }
 
-# 3. Integración/Suscripción de la Lambda al Topic de SNS existente
+# 5. Integración/Suscripción de la Lambda al Topic de SNS existente
 resource "aws_sns_topic_subscription" "lambda_sub" {
   topic_arn = var.sns_topic_arn
   protocol  = "lambda"
