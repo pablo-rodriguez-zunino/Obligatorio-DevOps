@@ -15,6 +15,21 @@ resource "aws_security_group" "alb" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Permitir tráfico TCP interno para persistencia
+  ingress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 6379
+    to_port     = 6379
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -23,7 +38,7 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# 3. Grupo de Seguridad para Contenedores ECS (Permite interconexión nativa)
+# 3. Grupo de Seguridad para Contenedores ECS
 resource "aws_security_group" "ecs_tasks" {
   name        = "retail-${var.environment}-ecs-tasks-sg"
   vpc_id      = var.vpc_id
@@ -59,7 +74,7 @@ resource "aws_lb" "main" {
   subnets            = var.public_subnets
 }
 
-# 5. Listener HTTP (Puerto 80)
+# 5. Listeners del ALB (Requisito de AWS para que no queden huérfanos)
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port               = "80"
@@ -71,7 +86,29 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# 6. Target Groups para los servicios web expuestos
+resource "aws_lb_listener" "db_listener" {
+  load_balancer_arn = aws_lb.main.arn
+  port               = "5432"
+  protocol           = "HTTP" # Mantenemos HTTP por tipo de ALB, la app enviará tráfico al puerto del ALB
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.db.arn
+  }
+}
+
+resource "aws_lb_listener" "redis_listener" {
+  load_balancer_arn = aws_lb.main.arn
+  port               = "6379"
+  protocol           = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.redis.arn
+  }
+}
+
+# 6. Target Groups
 resource "aws_lb_target_group" "targets" {
   for_each    = toset(var.services)
   name        = "tg-${each.value}"
@@ -90,9 +127,31 @@ resource "aws_lb_target_group" "targets" {
   }
 }
 
-# 7. Reglas de ruteo del ALB para derivar tráfico HTTP externo
+resource "aws_lb_target_group" "db" {
+  name        = "tg-retail-db"
+  port        = 5432
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+  health_check {
+    matcher = "200-499"
+  }
+}
+
+resource "aws_lb_target_group" "redis" {
+  name        = "tg-retail-redis"
+  port        = 6379
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+  health_check {
+    matcher = "200-499"
+  }
+}
+
+# 7. Reglas de ruteo del ALB
 resource "aws_lb_listener_rule" "routing" {
-  for_each     = toset([for s in var.services : s if s != "ui" && s != "admin" && s != "db"])
+  for_each     = toset([for s in var.services : s if s != "ui" && s != "admin"])
   listener_arn = aws_lb_listener.http.arn
   priority     = index(var.services, each.value) + 10
 
@@ -125,7 +184,7 @@ resource "aws_lb_listener_rule" "admin" {
 }
 
 # =========================================================================
-# BLOQUE 1: SERVICIO DE ADMIN + PERSISTENCIA (Se levanta primero)
+# BLOQUE 1: SERVICIO DE ADMIN + PERSISTENCIA
 # =========================================================================
 resource "aws_ecs_task_definition" "admin_stack" {
   family                   = "retail-admin-stack"
@@ -137,7 +196,6 @@ resource "aws_ecs_task_definition" "admin_stack" {
   task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
 
   container_definitions = jsonencode([
-    # --- BASE DE DATOS ---
     {
       name      = "retail-db"
       image     = "${var.repository_urls["db"]}:latest"
@@ -149,14 +207,12 @@ resource "aws_ecs_task_definition" "admin_stack" {
         { name = "POSTGRES_PASSWORD", value = var.db_password }
       ]
     },
-    # --- REDIS ---
     {
       name      = "retail-redis"
       image     = "redis:7-alpine"
       essential = true
       portMappings = [{ containerPort = 6379, hostPort = 6379 }]
     },
-    # --- ADMIN ---
     {
       name      = "retail-admin"
       image     = "${var.repository_urls["admin"]}:latest"
@@ -194,22 +250,23 @@ resource "aws_ecs_service" "admin_service" {
     container_port   = 8081
   }
 
-  depends_on = [aws_lb_listener.http]
-}
-
-# =========================================================================
-# DATA SOURCE: Captura de manera segura la IP privada asignada a la DB/Redis
-# =========================================================================
-data "aws_network_interface" "admin_stack_interface" {
-  depends_on = [aws_ecs_service.admin_service]
-  filter {
-    name   = "description"
-    values = ["ECS retail-admin-service*"]
+  load_balancer {
+    target_group_arn = aws_lb_target_group.db.arn
+    container_name   = "retail-db"
+    container_port   = 5432
   }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.redis.arn
+    container_name   = "retail-redis"
+    container_port   = 6379
+  }
+
+  depends_on = [aws_lb_listener.http, aws_lb_listener.db_listener, aws_lb_listener.redis_listener]
 }
 
 # =========================================================================
-# BLOQUE 2: SERVICIO CORE DE APLICACIONES (Límite de 5 ALB Asociados Respetado)
+# BLOQUE 2: SERVICIO CORE DE APLICACIONES (Usando el ALB como DNS interno estable)
 # =========================================================================
 resource "aws_ecs_task_definition" "core_stack" {
   family                   = "retail-core-stack"
@@ -243,7 +300,7 @@ resource "aws_ecs_task_definition" "core_stack" {
       environment = [
         { name = "GIN_MODE", value = "release" },
         { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "${data.aws_network_interface.admin_stack_interface.private_ip}:5432" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "${aws_lb.main.dns_name}:5432" },
         { name = "RETAIL_CATALOG_PERSISTENCE_DB_NAME", value = "catalogdb" },
         { name = "RETAIL_CATALOG_PERSISTENCE_USER", value = "retail_user" },
         { name = "RETAIL_CATALOG_PERSISTENCE_PASSWORD", value = var.db_password }
@@ -257,7 +314,7 @@ resource "aws_ecs_task_definition" "core_stack" {
       portMappings = [{ containerPort = 8080, hostPort = 8080 }]
       environment = [
         { name = "CART_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "CART_POSTGRES_HOST", value = data.aws_network_interface.admin_stack_interface.private_ip },
+        { name = "CART_POSTGRES_HOST", value = aws_lb.main.dns_name },
         { name = "CART_POSTGRES_PORT", value = "5432" },
         { name = "CART_POSTGRES_DB", value = "cartdb" },
         { name = "CART_POSTGRES_USER", value = "retail_user" },
@@ -273,7 +330,7 @@ resource "aws_ecs_task_definition" "core_stack" {
       portMappings = [{ containerPort = 8080, hostPort = 8080 }]
       environment = [
         { name = "GIN_MODE", value = "release" },
-        { name = "RETAIL_ORDERS_PERSISTENCE_ENDPOINT", value = "${data.aws_network_interface.admin_stack_interface.private_ip}:5432" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_ENDPOINT", value = "${aws_lb.main.dns_name}:5432" },
         { name = "RETAIL_ORDERS_PERSISTENCE_NAME", value = "orders" },
         { name = "RETAIL_ORDERS_PERSISTENCE_USERNAME", value = "retail_user" },
         { name = "RETAIL_ORDERS_PERSISTENCE_PASSWORD", value = var.db_password }
@@ -287,7 +344,7 @@ resource "aws_ecs_task_definition" "core_stack" {
       portMappings = [{ containerPort = 8080, hostPort = 8080 }]
       environment = [
         { name = "RETAIL_CHECKOUT_PERSISTENCE_PROVIDER", value = "redis" },
-        { name = "RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL", value = "redis://${data.aws_network_interface.admin_stack_interface.private_ip}:6379" },
+        { name = "RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL", value = "redis://${aws_lb.main.dns_name}:6379" },
         { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://127.0.0.1:8080" }
       ]
     }
