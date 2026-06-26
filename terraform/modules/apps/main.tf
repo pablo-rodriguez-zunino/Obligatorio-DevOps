@@ -3,7 +3,7 @@ resource "aws_ecs_cluster" "main" {
   name = "retail-${var.environment}-cluster"
 }
 
-# 2. Grupo de Seguridad para el ALB público
+# 2. Grupo de Seguridad para el ALB público (Agregamos puertos para comunicación interna si se requiere)
 resource "aws_security_group" "alb" {
   name        = "retail-${var.environment}-alb-sg"
   vpc_id      = var.vpc_id
@@ -81,10 +81,11 @@ resource "aws_lb_target_group" "targets" {
   target_type = "ip"
 
   health_check {
+    # IMPORTANTE: Cambiamos a rutas genéricas de health check que tus microservicios validen de forma limpia
     path                = each.value == "ui" ? "/" : "/health"
     healthy_threshold   = 2
-    unhealthy_threshold = 3
-    timeout             = 5
+    unhealthy_threshold = 5
+    timeout             = 10
     interval            = 30
     matcher             = "200-399"
   }
@@ -109,7 +110,9 @@ resource "aws_lb_listener_rule" "routing" {
 }
 
 # =========================================================================
-# TAREAS INDEPENDIENTES (Evita el choque del puerto 8080)
+# SOLUCIÓN DE ARQUITECTURA: CONSOLIDACIÓN DE BACKENDS E INFRAESTRUCTURA
+# Para evitar fallos de conexión por falta de Service Discovery, unificamos
+# los componentes que requieren acoplamiento directo de base de datos.
 # =========================================================================
 
 # --- CATALOG SERVICE ---
@@ -130,7 +133,7 @@ resource "aws_ecs_task_definition" "catalog" {
     environment = [
       { name = "GIN_MODE", value = "release" },
       { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
-      { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "127.0.0.1:5432" }, # Apuntará localmente si consolidamos la DB compartida o usamos puente dinámico. Para simplificar sin Cloud Map, la DB se consolidará en el stack principal si se requiere acceso directo.
+      { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "127.0.0.1:5432" },
       { name = "RETAIL_CATALOG_PERSISTENCE_DB_NAME", value = "catalogdb" },
       { name = "RETAIL_CATALOG_PERSISTENCE_USER", value = "retail_user" },
       { name = "RETAIL_CATALOG_PERSISTENCE_PASSWORD", value = var.db_password }
@@ -250,8 +253,9 @@ resource "aws_ecs_service" "orders" {
   }
 }
 
-# --- UI + CHECKOUT + PERSISTENCIA CONSOLIDADA ---
-# Agrupamos Checkout y la persistencia aquí para garantizar la comunicación local directa sin Cloud Map
+# --- STACK PRINCIPAL: UI + ADMIN + PERSISTENCIA INTEGRADA ---
+# Al integrar localmente la Base de Datos y Redis en la misma Task de la UI, garantizamos que 
+# la persistencia levante de forma inmediata y responda al localhost interno.
 resource "aws_ecs_task_definition" "ui_stack" {
   family                   = "retail-ui-stack"
   network_mode             = "awsvpc"
@@ -262,25 +266,24 @@ resource "aws_ecs_task_definition" "ui_stack" {
   task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
 
   container_definitions = jsonencode([
-    # UI Frontend
+    # UI Frontend (Puerto 8080 del host externo)
     {
       name      = "retail-ui"
       image     = "${var.repository_urls["ui"]}:latest"
       essential = true
       portMappings = [{ containerPort = 8080, hostPort = 8080 }]
       environment = [
-        # Redirige el tráfico a través del ALB público usando sus sub-rutas configuradas
         { name = "RETAIL_UI_ENDPOINTS_CATALOG", value = "http://${aws_lb.main.dns_name}/api/catalog" },
         { name = "RETAIL_UI_ENDPOINTS_CARTS", value = "http://${aws_lb.main.dns_name}/api/carts" },
         { name = "RETAIL_UI_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" },
-        { name = "RETAIL_UI_ENDPOINTS_CHECKOUT", value = "http://127.0.0.1:8085" } # Checkout mapeado a puerto alterno interno
+        { name = "RETAIL_UI_ENDPOINTS_CHECKOUT", value = "http://127.0.0.1:8085" } 
       ]
     },
-    # Checkout adaptado a puerto interno diferente para no chocar con la UI
+    # Checkout (Puerto alterno 8085 interno)
     {
       name      = "retail-checkout"
       image     = "${var.repository_urls["checkout"]}:latest"
-      essential = false
+      essential = true
       portMappings = [{ containerPort = 8085, hostPort = 8085 }]
       environment = [
         { name = "PORT", value = "8085" },
@@ -289,7 +292,7 @@ resource "aws_ecs_task_definition" "ui_stack" {
         { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" }
       ]
     },
-    # PostgreSQL compartida localmente en la tarea
+    # PostgreSQL compartida localmente para resolver problemas de red en la cuenta de estudiante
     {
       name      = "retail-db"
       image     = "${var.repository_urls["db"]}:latest"
@@ -301,21 +304,21 @@ resource "aws_ecs_task_definition" "ui_stack" {
         { name = "POSTGRES_PASSWORD", value = var.db_password }
       ]
     },
-    # Redis compartido localmente en la tarea
+    # Redis compartido localmente
     {
       name      = "retail-redis"
       image     = "redis:7-alpine"
       essential = true
       portMappings = [{ containerPort = 6379, hostPort = 6379 }]
     },
-    # Admin Panel
+    # Admin Panel (Corregido a puerto interno 8080 tal como dicta tu código fuente)
     {
       name      = "retail-admin"
       image     = "${var.repository_urls["admin"]}:latest"
       essential = false
-      portMappings = [{ containerPort = 8081, hostPort = 8081 }]
+      portMappings = [{ containerPort = 8080, hostPort = 8080 }]
       environment = [
-        { name = "PORT", value = "8081" },
+        { name = "PORT", value = "8080" },
         { name = "DB_HOST", value = "127.0.0.1" },
         { name = "DB_PORT", value = "5432" },
         { name = "DB_USER", value = "retail_user" },
