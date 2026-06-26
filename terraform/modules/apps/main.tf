@@ -245,12 +245,17 @@ resource "aws_ecs_service" "db" {
     assign_public_ip = true
   }
 
+  # CONFIGURACIÓN CORREGIDA PARA EL PROVEEDOR DE AWS 5.X
   service_connect_configuration {
     enabled   = true
     namespace = aws_service_discovery_http_namespace.main.arn
-    client_alias {
-      dns_name = "retail-db.retail.internal"
-      port     = 5432
+    service {
+      port_name      = "postgres"
+      discovery_name = "retail-db"
+      client_alias {
+        port     = 5432
+        dns_name = "retail-db.retail.internal"
+      }
     }
   }
 }
@@ -296,12 +301,22 @@ resource "aws_ecs_service" "redis" {
     assign_public_ip = true
   }
 
+  # CONFIGURACIÓN CORREGIDA PARA EL PROVEEDOR DE AWS 5.X
   service_connect_configuration {
     enabled   = true
     namespace = aws_service_discovery_http_namespace.main.arn
-    client_alias {
-      dns_name = "retail-redis.retail.internal"
-      port     = 6379
+    service {
+      port_name      = "redis"
+      discovery_name = "retail-redis"
+      client_alias {
+        port     = 6379
+        dns_name = "retail-redis.retail.internal"
+      }
     }
   }
+}
+
+# ASEGURATE DE QUE ESTE OUTPUT ESTÉ AL FINAL DEL ARCHIVO MODULES/APPS/MAIN.TF
+output "alb_dns_name" {
+  value = aws_lb.main.dns_name
 }
