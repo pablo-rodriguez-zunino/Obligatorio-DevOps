@@ -3,7 +3,7 @@ resource "aws_ecs_cluster" "main" {
   name = "retail-${var.environment}-cluster"
 }
 
-# 2. Grupo de Seguridad para el ALB público (Agregamos puertos para comunicación interna si se requiere)
+# 2. Grupo de Seguridad para el ALB público
 resource "aws_security_group" "alb" {
   name        = "retail-${var.environment}-alb-sg"
   vpc_id      = var.vpc_id
@@ -81,7 +81,8 @@ resource "aws_lb_target_group" "targets" {
   target_type = "ip"
 
   health_check {
-    path                = each.value == "ui" ? "/" : "/health"
+    # IMPORTANTE: Apunta a la ruta real /health de express y backends de go/python
+    path                = "/health" 
     healthy_threshold   = 2
     unhealthy_threshold = 5
     timeout             = 10
@@ -144,7 +145,7 @@ resource "aws_ecs_service" "catalog" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [var.private_subnet_id]
+    subnets          = var.public_subnets # ◄ CAMBIADO A SUB-REDES PÚBLICAS
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = true
   }
@@ -193,7 +194,7 @@ resource "aws_ecs_service" "carts" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [var.private_subnet_id]
+    subnets          = var.public_subnets # ◄ CAMBIADO A SUB-REDES PÚBLICAS
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = true
   }
@@ -240,7 +241,7 @@ resource "aws_ecs_service" "orders" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [var.private_subnet_id]
+    subnets          = var.public_subnets # ◄ CAMBIADO A SUB-REDES PÚBLICAS
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = true
   }
@@ -317,7 +318,7 @@ resource "aws_ecs_service" "ui_service" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [var.private_subnet_id]
+    subnets          = var.public_subnets # ◄ CAMBIADO A SUB-REDES PÚBLICAS
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = true
   }
@@ -369,7 +370,7 @@ resource "aws_ecs_service" "admin_service" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [var.private_subnet_id]
+    subnets          = var.public_subnets # ◄ CAMBIADO A SUB-REDES PÚBLICAS
     security_groups  = [aws_security_group.ecs_tasks.id]
     assign_public_ip = true
   }
