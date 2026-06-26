@@ -9,7 +9,7 @@ on:
 
 jobs:
   # =========================================================================
-  # ETAPA 1: CALIDAD Y SEGURIDAD (Para develop, main y Pull Requests)
+  # ETAPA 1: CALIDAD Y SEGURIDAD
   # =========================================================================
   security-and-quality:
     name: Code Quality & Security Scan
@@ -20,13 +20,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # SCA: Detección de Secretos
       - name: Secret Detection (Gitleaks)
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # SAST: Análisis Estático con SonarQube Cloud
       - name: SonarQube Cloud Scan
         uses: SonarSource/sonarcloud-github-action@master
         env:
@@ -34,17 +32,52 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # =========================================================================
-  # ETAPA 2: AMBIENTE DEV (Estrategia Matrix en Paralelo)
+  # ETAPA 2: INFRAESTRUCTURA (Terraform con -reconfigure por Reset)
+  # =========================================================================
+  infrastructure:
+    name: Deploy AWS Infrastructure (Terraform)
+    needs: security-and-quality
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+
+      - name: Terraform Init & Reconfigure
+        run: |
+          cd terraform
+          terraform init -reconfigure
+
+      - name: Terraform Apply
+        run: |
+          cd terraform
+          terraform apply -auto-approve -var="environment=dev"
+
+  # =========================================================================
+  # ETAPA 3: AMBIENTE DEV (Estrategia Matrix en Paralelo)
   # =========================================================================
   deploy-dev:
     name: Build & Publish DEV (${{ matrix.service }})
-    needs: security-and-quality
+    needs: infrastructure  # ◄ IMPORTANTE: Espera a que Terraform cree los servicios primero
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     environment: dev
     strategy:
       matrix:
-        # Definimos los pares de (servicio, ruta) para mapear todo ordenado
         include:
           - service: "ui"
             path: "./src/ui"
@@ -53,12 +86,11 @@ jobs:
           - service: "catalog"
             path: "./src/catalog"
           - service: "carts"
-            path: "./src/cart" # Ojo: mapea la carpeta /cart
+            path: "./src/cart"
           - service: "orders"
             path: "./src/orders"
           - service: "checkout"
             path: "./src/checkout"
-          # ◄ ADICIÓN SEGURA: Base de datos mapeada a su nueva carpeta src/db
           - service: "db"
             path: "./src/db"
     steps:
@@ -77,34 +109,41 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 1. Build de la imagen del servicio actual de la matriz
       - name: Build Docker Image
         run: |
           IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/retail-${{ matrix.service }}:latest"
           docker build --no-cache -t $IMAGE_URI ${{ matrix.path }}
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
-      # 2. Escaneo de vulnerabilidades nativo usando la ACCIÓN oficial
       - name: Run Trivy Vulnerability Scanner
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_URI }}
           format: 'table'
-          # ◄ AJUSTE DE CONTROL: Si es la db, tira exit-code 0 para que no aborte. Sigue siendo estricto (exit-code 1) con las web apps.
           exit-code: ${{ matrix.service == 'db' && '0' || '1' }}
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL'
 
-      # 3. Push a ECR si el scanner dio verde
       - name: Push Image to Amazon ECR
         run: docker push ${{ env.IMAGE_URI }}
 
-      # 4. Refrescar el servicio en ECS Fargate (Corregido para la arquitectura unificada)
+      # 4. Refrescar el servicio correcto en ECS Fargate mapeando los nombres nuevos
       - name: Force ECS Deployment
         run: |
-          if [[ "${{ matrix.service }}" == "admin" || "${{ matrix.service }}" == "db" ]]; then
-            aws ecs update-service --cluster retail-dev-cluster --service retail-admin-service --force-new-deployment || echo "Aviso: Servicio Admin no listo."
-          else
-            aws ecs update-service --cluster retail-dev-cluster --service retail-core-service --force-new-deployment || echo "Aviso: Servicio Core no listo."
+          CLUSTER_NAME="retail-dev-cluster"
+          
+          if [[ "${{ matrix.service }}" == "ui" || "${{ matrix.service }}" == "checkout" || "${{ matrix.service }}" == "db" ]]; then
+            SERVICE_NAME="retail-ui-service"
+          elif [[ "${{ matrix.service }}" == "catalog" ]]; then
+            SERVICE_NAME="retail-catalog-service"
+          elif [[ "${{ matrix.service }}" == "carts" ]]; then
+            SERVICE_NAME="retail-carts-service"
+          elif [[ "${{ matrix.service }}" == "orders" ]]; then
+            SERVICE_NAME="retail-orders-service"
+          elif [[ "${{ matrix.service }}" == "admin" ]]; then
+            SERVICE_NAME="retail-admin-service"
           fi
+          
+          echo "Forzando despliegue de ${{ matrix.service }} en el servicio ECS $SERVICE_NAME..."
+          aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --force-new-deployment || echo "Aviso: El servicio $SERVICE_NAME aún no está listo o procesando."
