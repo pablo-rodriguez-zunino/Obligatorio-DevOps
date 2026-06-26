@@ -100,8 +100,11 @@ jobs:
       - name: Push Image to Amazon ECR
         run: docker push ${{ env.IMAGE_URI }}
 
-      # 4. Refrescar el servicio en ECS Fargate
-      # Control de fallos integrado: si el servicio de la DB aún no existe en ECS, no frena el flujo.
+      # 4. Refrescar el servicio en ECS Fargate (Corregido para la arquitectura unificada)
       - name: Force ECS Deployment
         run: |
-          aws ecs update-service --cluster retail-dev-cluster --service retail-${{ matrix.service }} --force-new-deployment || echo "Aviso: El servicio retail-${{ matrix.service }} aun no esta desplegado en ECS. Imagen subida a ECR correctamente."
+          if [[ "${{ matrix.service }}" == "admin" || "${{ matrix.service }}" == "db" ]]; then
+            aws ecs update-service --cluster retail-dev-cluster --service retail-admin-service --force-new-deployment || echo "Aviso: Servicio Admin no listo."
+          else
+            aws ecs update-service --cluster retail-dev-cluster --service retail-core-service --force-new-deployment || echo "Aviso: Servicio Core no listo."
+          fi

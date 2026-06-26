@@ -15,21 +15,6 @@ resource "aws_security_group" "alb" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Permitir ruteo interno de base de datos y redis a través del ALB
-  ingress {
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 6379
-    to_port     = 6379
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -38,7 +23,7 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# 3. Grupo de Seguridad para Contenedores ECS
+# 3. Grupo de Seguridad para Contenedores ECS (Permite interconexión nativa)
 resource "aws_security_group" "ecs_tasks" {
   name        = "retail-${var.environment}-ecs-tasks-sg"
   vpc_id      = var.vpc_id
@@ -86,7 +71,7 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# 6. Target Groups para los 6 servicios web + persistencia
+# 6. Target Groups para los servicios web expuestos
 resource "aws_lb_target_group" "targets" {
   for_each    = toset(var.services)
   name        = "tg-${each.value}"
@@ -105,32 +90,9 @@ resource "aws_lb_target_group" "targets" {
   }
 }
 
-# Target Groups específicos para ruteo TCP de Persistencia vía ALB
-resource "aws_lb_target_group" "db" {
-  name        = "tg-retail-db"
-  port        = 5432
-  protocol    = "HTTP" # Mantenemos HTTP por compatibilidad de tipo de ALB
-  vpc_id      = var.vpc_id
-  target_type = "ip"
-  health_check {
-    matcher = "200-499" # Evita fallas si postgres rechaza los paquetes HTTP iniciales
-  }
-}
-
-resource "aws_lb_target_group" "redis" {
-  name        = "tg-retail-redis"
-  port        = 6379
-  protocol    = "HTTP"
-  vpc_id      = var.vpc_id
-  target_type = "ip"
-  health_check {
-    matcher = "200-499"
-  }
-}
-
-# 7. Reglas de ruteo del ALB para servicios web
+# 7. Reglas de ruteo del ALB para derivar tráfico HTTP externo
 resource "aws_lb_listener_rule" "routing" {
-  for_each     = toset([for s in var.services : s if s != "ui" && s != "admin"])
+  for_each     = toset([for s in var.services : s if s != "ui" && s != "admin" && s != "db"])
   listener_arn = aws_lb_listener.http.arn
   priority     = index(var.services, each.value) + 10
 
@@ -163,115 +125,7 @@ resource "aws_lb_listener_rule" "admin" {
 }
 
 # =========================================================================
-# BLOQUE 1: SERVICIO CORE DE APLICACIONES (5 Load Balancers - Límite de AWS respetado)
-# =========================================================================
-resource "aws_ecs_task_definition" "core_stack" {
-  family                   = "retail-core-stack"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = "1024"
-  memory                   = "2048"
-  execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
-  task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
-
-  container_definitions = jsonencode([
-    # --- UI (FRONTEND) ---
-    {
-      name      = "retail-ui"
-      image     = "${var.repository_urls["ui"]}:latest"
-      essential = true
-      portMappings = [{ containerPort = 8080, hostPort = 8080 }]
-      environment = [
-        { name = "RETAIL_UI_ENDPOINTS_CATALOG", value = "http://127.0.0.1:8080" },
-        { name = "RETAIL_UI_ENDPOINTS_CARTS", value = "http://127.0.0.1:8080" },
-        { name = "RETAIL_UI_ENDPOINTS_CHECKOUT", value = "http://127.0.0.1:8080" },
-        { name = "RETAIL_UI_ENDPOINTS_ORDERS", value = "http://127.0.0.1:8080" }
-      ]
-    },
-    # --- CATALOG ---
-    {
-      name      = "retail-catalog"
-      image     = "${var.repository_urls["catalog"]}:latest"
-      essential = true
-      environment = [
-        { name = "GIN_MODE", value = "release" },
-        { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "${aws_lb.main.dns_name}:5432" },
-        { name = "RETAIL_CATALOG_PERSISTENCE_DB_NAME", value = "catalogdb" },
-        { name = "RETAIL_CATALOG_PERSISTENCE_USER", value = "retail_user" },
-        { name = "RETAIL_CATALOG_PERSISTENCE_PASSWORD", value = var.db_password }
-      ]
-    },
-    # --- CARTS ---
-    {
-      name      = "retail-carts"
-      image     = "${var.repository_urls["carts"]}:latest"
-      essential = true
-      environment = [
-        { name = "CART_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "CART_POSTGRES_HOST", value = aws_lb.main.dns_name },
-        { name = "CART_POSTGRES_PORT", value = "5432" },
-        { name = "CART_POSTGRES_DB", value = "cartdb" },
-        { name = "CART_POSTGRES_USER", value = "retail_user" },
-        { name = "CART_POSTGRES_PASSWORD", value = var.db_password },
-        { name = "PORT", value = "8080" }
-      ]
-    },
-    # --- ORDERS ---
-    {
-      name      = "retail-orders"
-      image     = "${var.repository_urls["orders"]}:latest"
-      essential = true
-      environment = [
-        { name = "GIN_MODE", value = "release" },
-        { name = "RETAIL_ORDERS_PERSISTENCE_ENDPOINT", value = "${aws_lb.main.dns_name}:5432" },
-        { name = "RETAIL_ORDERS_PERSISTENCE_NAME", value = "orders" },
-        { name = "RETAIL_ORDERS_PERSISTENCE_USERNAME", value = "retail_user" },
-        { name = "RETAIL_ORDERS_PERSISTENCE_PASSWORD", value = var.db_password }
-      ]
-    },
-    # --- CHECKOUT ---
-    {
-      name      = "retail-checkout"
-      image     = "${var.repository_urls["checkout"]}:latest"
-      essential = true
-      environment = [
-        { name = "RETAIL_CHECKOUT_PERSISTENCE_PROVIDER", value = "redis" },
-        { name = "RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL", value = "redis://${aws_lb.main.dns_name}:6379" },
-        { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://127.0.0.1:8080" }
-      ]
-    }
-  ])
-}
-
-resource "aws_ecs_service" "core_service" {
-  name            = "retail-core-service"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.core_stack.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = [var.private_subnet_id]
-    security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true
-  }
-
-  # Asociamos las 5 aplicaciones web permitidas sin saturar el balanceador del servicio
-  dynamic "load_balancer" {
-    for_each = toset(["ui", "catalog", "carts", "orders", "checkout"])
-    content {
-      target_group_arn = aws_lb_target_group.targets[load_balancer.value].arn
-      container_name   = "retail-${load_balancer.value}"
-      container_port   = 8080
-    }
-  }
-
-  depends_on = [aws_lb_listener.http]
-}
-
-# =========================================================================
-# BLOQUE 2: SERVICIO DE ADMIN + PERSISTENCIA (Aislado de forma segura)
+# BLOQUE 1: SERVICIO DE ADMIN + PERSISTENCIA (Se levanta primero)
 # =========================================================================
 resource "aws_ecs_task_definition" "admin_stack" {
   family                   = "retail-admin-stack"
@@ -334,27 +188,135 @@ resource "aws_ecs_service" "admin_service" {
     assign_public_ip = true
   }
 
-  # Balanceador para la web del Admin
   load_balancer {
     target_group_arn = aws_lb_target_group.targets["admin"].arn
     container_name   = "retail-admin"
     container_port   = 8081
   }
 
-  # Balanceadores internos para mapear la persistencia hacia las demás apps por medio del ALB
-  load_balancer {
-    target_group_arn = aws_lb_target_group.db.arn
-    container_name   = "retail-db"
-    container_port   = 5432
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.redis.arn
-    container_name   = "retail-redis"
-    container_port   = 6379
-  }
-
   depends_on = [aws_lb_listener.http]
+}
+
+# =========================================================================
+# DATA SOURCE: Captura de manera segura la IP privada asignada a la DB/Redis
+# =========================================================================
+data "aws_network_interface" "admin_stack_interface" {
+  depends_on = [aws_ecs_service.admin_service]
+  filter {
+    name   = "description"
+    values = ["ECS retail-admin-service*"]
+  }
+}
+
+# =========================================================================
+# BLOQUE 2: SERVICIO CORE DE APLICACIONES (Límite de 5 ALB Asociados Respetado)
+# =========================================================================
+resource "aws_ecs_task_definition" "core_stack" {
+  family                   = "retail-core-stack"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "1024"
+  memory                   = "2048"
+  execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
+  task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
+
+  container_definitions = jsonencode([
+    # --- UI (FRONTEND) ---
+    {
+      name      = "retail-ui"
+      image     = "${var.repository_urls["ui"]}:latest"
+      essential = true
+      portMappings = [{ containerPort = 8080, hostPort = 8080 }]
+      environment = [
+        { name = "RETAIL_UI_ENDPOINTS_CATALOG", value = "http://127.0.0.1:8080" },
+        { name = "RETAIL_UI_ENDPOINTS_CARTS", value = "http://127.0.0.1:8080" },
+        { name = "RETAIL_UI_ENDPOINTS_CHECKOUT", value = "http://127.0.0.1:8080" },
+        { name = "RETAIL_UI_ENDPOINTS_ORDERS", value = "http://127.0.0.1:8080" }
+      ]
+    },
+    # --- CATALOG ---
+    {
+      name      = "retail-catalog"
+      image     = "${var.repository_urls["catalog"]}:latest"
+      essential = true
+      portMappings = [{ containerPort = 8080, hostPort = 8080 }]
+      environment = [
+        { name = "GIN_MODE", value = "release" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "${data.aws_network_interface.admin_stack_interface.private_ip}:5432" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_DB_NAME", value = "catalogdb" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_USER", value = "retail_user" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_PASSWORD", value = var.db_password }
+      ]
+    },
+    # --- CARTS ---
+    {
+      name      = "retail-carts"
+      image     = "${var.repository_urls["carts"]}:latest"
+      essential = true
+      portMappings = [{ containerPort = 8080, hostPort = 8080 }]
+      environment = [
+        { name = "CART_PERSISTENCE_PROVIDER", value = "postgres" },
+        { name = "CART_POSTGRES_HOST", value = data.aws_network_interface.admin_stack_interface.private_ip },
+        { name = "CART_POSTGRES_PORT", value = "5432" },
+        { name = "CART_POSTGRES_DB", value = "cartdb" },
+        { name = "CART_POSTGRES_USER", value = "retail_user" },
+        { name = "CART_POSTGRES_PASSWORD", value = var.db_password },
+        { name = "PORT", value = "8080" }
+      ]
+    },
+    # --- ORDERS ---
+    {
+      name      = "retail-orders"
+      image     = "${var.repository_urls["orders"]}:latest"
+      essential = true
+      portMappings = [{ containerPort = 8080, hostPort = 8080 }]
+      environment = [
+        { name = "GIN_MODE", value = "release" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_ENDPOINT", value = "${data.aws_network_interface.admin_stack_interface.private_ip}:5432" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_NAME", value = "orders" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_USERNAME", value = "retail_user" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_PASSWORD", value = var.db_password }
+      ]
+    },
+    # --- CHECKOUT ---
+    {
+      name      = "retail-checkout"
+      image     = "${var.repository_urls["checkout"]}:latest"
+      essential = true
+      portMappings = [{ containerPort = 8080, hostPort = 8080 }]
+      environment = [
+        { name = "RETAIL_CHECKOUT_PERSISTENCE_PROVIDER", value = "redis" },
+        { name = "RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL", value = "redis://${data.aws_network_interface.admin_stack_interface.private_ip}:6379" },
+        { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://127.0.0.1:8080" }
+      ]
+    }
+  ])
+}
+
+resource "aws_ecs_service" "core_service" {
+  name            = "retail-core-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.core_stack.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = [var.private_subnet_id]
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = true
+  }
+
+  dynamic "load_balancer" {
+    for_each = toset(["ui", "catalog", "carts", "orders", "checkout"])
+    content {
+      target_group_arn = aws_lb_target_group.targets[load_balancer.value].arn
+      container_name   = "retail-${load_balancer.value}"
+      container_port   = 8080
+    }
+  }
+
+  depends_on = [aws_lb_listener.http, aws_ecs_service.admin_service]
 }
 
 output "alb_dns_name" {
