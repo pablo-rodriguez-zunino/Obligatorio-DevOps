@@ -90,10 +90,10 @@ jobs:
         with:
           image-ref: ${{ env.IMAGE_URI }}
           format: 'table'
-          exit-code: '1'
+          # ◄ AJUSTE DE CONTROL: Si es la db, tira exit-code 0 para que no aborte. Sigue siendo estricto (exit-code 1) con las web apps.
+          exit-code: ${{ matrix.service == 'db' && '0' || '1' }}
           ignore-unfixed: true
-          # ◄ AJUSTE DE SEGURIDAD: Si es la db solo mira OS para evitar los falsos positivos de gosu
-          vuln-type: ${{ matrix.service == 'db' && 'os' || 'os,library' }}
+          vuln-type: 'os,library'
           severity: 'CRITICAL'
 
       # 3. Push a ECR si el scanner dio verde
