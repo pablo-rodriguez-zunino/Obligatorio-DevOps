@@ -414,3 +414,16 @@ module "monitoring" {
   response_time_threshold   = 2
   unhealthy_hosts_threshold = 1
 }
+
+# =========================================================================
+# SECCIÓN 7: SERVICIO SERVERLESS (AWS LAMBDA INTEGRADO A ALERTAS)
+# =========================================================================
+module "serverless_monitoring" {
+  source = "../serverless"
+
+  app_name      = "retailStore"
+  environment   = var.environment
+  
+  # Nos colgamos dinámicamente del output de SNS del monitoreo de la UI
+  sns_topic_arn = module.monitoring["ui"].sns_topic_arn
+}
