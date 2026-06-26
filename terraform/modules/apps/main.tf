@@ -23,7 +23,7 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# 3. Grupo de Seguridad para Contenedores (Permite ALB e intercomunicación directa por IP privada)
+# 3. Grupo de Seguridad para Contenedores
 resource "aws_security_group" "ecs_tasks" {
   name        = "retail-${var.environment}-ecs-tasks-sg"
   vpc_id      = var.vpc_id
@@ -71,7 +71,7 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# 6. Crear un Target Group por cada servicio mapeando sus puertos reales
+# 6. Crear un Target Group por cada servicio web
 resource "aws_lb_target_group" "targets" {
   for_each    = toset(var.services)
   name        = "tg-${each.value}"
@@ -90,7 +90,7 @@ resource "aws_lb_target_group" "targets" {
   }
 }
 
-# 7. Reglas de ruteo del ALB para derivar tráfico por URL path
+# 7. Reglas de ruteo del ALB
 resource "aws_lb_listener_rule" "routing" {
   for_each     = toset([for s in var.services : s if s != "ui"])
   listener_arn = aws_lb_listener.http.arn
@@ -109,14 +109,14 @@ resource "aws_lb_listener_rule" "routing" {
 }
 
 # =========================================================================
-# CAPA DE PERSISTENCIA: RETAIL-DB (PostgreSQL)
+# UNIFICACIÓN DE PERSISTENCIA (DB + REDIS juntas)
 # =========================================================================
-resource "aws_ecs_task_definition" "db" {
-  family                   = "retail-db"
+resource "aws_ecs_task_definition" "backbone" {
+  family                   = "retail-backbone"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
+  cpu                      = "512"
+  memory                   = "1024"
   execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
   task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
 
@@ -136,37 +136,7 @@ resource "aws_ecs_task_definition" "db" {
         { name = "POSTGRES_DB", value = "orders" },
         { name = "POSTGRES_PASSWORD", value = var.db_password }
       ]
-    }
-  ])
-}
-
-resource "aws_ecs_service" "db" {
-  name            = "retail-db"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.db.family
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = [var.private_subnet_id]
-    security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true
-  }
-}
-
-# =========================================================================
-# CAPA DE PERSISTENCIA: RETAIL-REDIS
-# =========================================================================
-resource "aws_ecs_task_definition" "redis" {
-  family                   = "retail-redis"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
-  execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
-  task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
-
-  container_definitions = jsonencode([
+    },
     {
       name      = "retail-redis"
       image     = "redis:7-alpine"
@@ -181,10 +151,10 @@ resource "aws_ecs_task_definition" "redis" {
   ])
 }
 
-resource "aws_ecs_service" "redis" {
-  name            = "retail-redis"
+resource "aws_ecs_service" "backbone" {
+  name            = "retail-backbone"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.redis.family
+  task_definition = aws_ecs_task_definition.backbone.arn
   desired_count   = 1
   launch_type     = "FARGATE"
 
@@ -196,21 +166,13 @@ resource "aws_ecs_service" "redis" {
 }
 
 # =========================================================================
-# lookup de IPs Dinámicas de DB y Redis para evitar usar Service Discovery
+# OBTENER LA ÚNICA IP PRIVADA DEL BACKBONE
 # =========================================================================
-data "aws_network_interface" "db_interface" {
-  depends_on = [aws_ecs_service.db]
+data "aws_network_interface" "backbone_interface" {
+  depends_on = [aws_ecs_service.backbone]
   filter {
     name   = "description"
-    values = ["ECS retail-db*"]
-  }
-}
-
-data "aws_network_interface" "redis_interface" {
-  depends_on = [aws_ecs_service.redis]
-  filter {
-    name   = "description"
-    values = ["ECS retail-redis*"]
+    values = ["ECS retail-backbone*"]
   }
 }
 
@@ -248,33 +210,29 @@ resource "aws_ecs_task_definition" "app" {
         
         { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" },
         
-        # Ajustes de REDIS usando la IP privada inyectada por Data Source
+        # Ambos apuntan a la misma IP privada del backbone compartido
         { name = "RETAIL_CHECKOUT_PERSISTENCE_PROVIDER", value = "redis" },
-        { name = "RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL", value = "redis://${data.aws_network_interface.redis_interface.private_ip}:6379" },
+        { name = "RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL", value = "redis://${data.aws_network_interface.backbone_interface.private_ip}:6379" },
 
-        # Ajustes de CATALOG usando las credenciales nativas del init-db.sql e IP dinámica
         { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "${data.aws_network_interface.db_interface.private_ip}:5432" },
+        { name = "RETAIL_CATALOG_PERSISTENCE_ENDPOINT", value = "${data.aws_network_interface.backbone_interface.private_ip}:5432" },
         { name = "RETAIL_CATALOG_PERSISTENCE_DB_NAME", value = "catalogdb" },
         { name = "RETAIL_CATALOG_PERSISTENCE_USER", value = "retail_user" },
         { name = "RETAIL_CATALOG_PERSISTENCE_PASSWORD", value = var.db_password },
 
-        # Ajustes de CARTS (Corregido según tu Docker Compose)
         { name = "CART_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "CART_POSTGRES_HOST", value = data.aws_network_interface.db_interface.private_ip },
+        { name = "CART_POSTGRES_HOST", value = data.aws_network_interface.backbone_interface.private_ip },
         { name = "CART_POSTGRES_PORT", value = "5432" },
         { name = "CART_POSTGRES_DB", value = "cartdb" },
         { name = "CART_POSTGRES_USER", value = "retail_user" },
         { name = "CART_POSTGRES_PASSWORD", value = var.db_password },
 
-        # Ajustes de ORDERS
-        { name = "RETAIL_ORDERS_PERSISTENCE_ENDPOINT", value = "${data.aws_network_interface.db_interface.private_ip}:5432" },
+        { name = "RETAIL_ORDERS_PERSISTENCE_ENDPOINT", value = "${data.aws_network_interface.backbone_interface.private_ip}:5432" },
         { name = "RETAIL_ORDERS_PERSISTENCE_NAME", value = "orders" },
         { name = "RETAIL_ORDERS_PERSISTENCE_USERNAME", value = "retail_user" },
         { name = "RETAIL_ORDERS_PERSISTENCE_PASSWORD", value = var.db_password },
 
-        # Panel de ADMIN
-        { name = "DB_HOST", value = data.aws_network_interface.db_interface.private_ip },
+        { name = "DB_HOST", value = data.aws_network_interface.backbone_interface.private_ip },
         { name = "DB_PORT", value = "5432" },
         { name = "DB_USER", value = "retail_user" },
         { name = "DB_PASSWORD", value = var.db_password },
@@ -306,7 +264,7 @@ resource "aws_ecs_service" "app" {
     container_port   = each.value == "admin" ? 8081 : 8080
   }
 
-  depends_on = [aws_lb_listener.http, aws_ecs_service.db, aws_ecs_service.redis]
+  depends_on = [aws_lb_listener.http, aws_ecs_service.backbone]
 }
 
 output "alb_dns_name" {
