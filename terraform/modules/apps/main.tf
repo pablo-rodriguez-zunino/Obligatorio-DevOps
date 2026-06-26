@@ -381,3 +381,36 @@ output "alb_dns_name" {
   value       = aws_lb.main.dns_name
   description = "DNS del Load Balancer"
 }
+
+# =========================================================================
+# INTEGRACIÓN DEL MÓDULO DE MONITOREO DINÁMICO (CLOUDWATCH)
+# =========================================================================
+module "monitoring" {
+  source   = "../cloudwatch"
+  for_each = toset(["ui", "catalog", "carts", "orders"])
+
+  # Variables básicas del entorno
+  app_name    = "retail-${each.value}"
+  environment = var.environment
+  aws_region  = "us-east-1" # Cambiar por tu región si es distinta (ej. var.aws_region)
+  alarm_email = "tu-email-de-estudiante@ort.edu.uy" # ◄ PONÉ TU EMAIL ACÁ PARA LAS ALERTAS
+
+  # Parámetro dinámico del Cluster
+  cluster_name = aws_ecs_cluster.main.name
+
+  # Mapeo condicional para obtener el ServiceName exacto de cada recurso ECS
+  service_name = each.value == "ui" ? aws_ecs_service.ui_service.name : (
+                 each.value == "catalog" ? aws_ecs_service.catalog.name : (
+                 each.value == "carts" ? aws_ecs_service.carts.name : aws_ecs_service.orders.name))
+
+  # Filtros nativos extraídos directamente del ALB y Target Groups
+  alb_arn_suffix           = aws_lb.main.arn_suffix
+  target_group_arn_suffix = aws_lb_target_group.targets[each.value].arn_suffix
+
+  # Umbrales configurados por defecto en tus variables (o podés personalizarlos acá)
+  cpu_threshold             = 80
+  memory_threshold          = 80
+  error_5xx_threshold       = 10
+  response_time_threshold   = 2
+  unhealthy_hosts_threshold = 1
+}
