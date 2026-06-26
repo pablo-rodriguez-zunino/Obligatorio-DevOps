@@ -22,3 +22,8 @@ variable "services" {
   type    = list(string)
   default = ["ui", "admin", "catalog", "carts", "orders", "checkout"]
 }
+
+variable "db_password" {
+  type    = string
+  default = "retailpassword"
+}

@@ -23,7 +23,7 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# 3. Grupo de Seguridad para los Contenedores ECS (Permite tráfico DESDE el ALB)
+# 3. Grupo de Seguridad para los Contenedores ECS (Permite tráfico DESDE el ALB e intercomunicación interna)
 resource "aws_security_group" "ecs_tasks" {
   name        = "retail-${var.environment}-ecs-tasks-sg"
   vpc_id      = var.vpc_id
@@ -33,6 +33,14 @@ resource "aws_security_group" "ecs_tasks" {
     to_port         = 0
     protocol        = "-1"
     security_groups = [aws_security_group.alb.id]
+  }
+
+  # Permitir tráfico entre las mismas tareas de ECS para conectar DB y Redis internamente
+  ingress {
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    self      = true
   }
 
   egress {
@@ -69,14 +77,12 @@ resource "aws_lb_target_group" "targets" {
   for_each    = toset(var.services)
   name        = "tg-${each.value}"
   
-  # CORRECCIÓN: admin corre en el 8081, el resto en el 8080
   port        = each.value == "admin" ? 8081 : 8080
   protocol    = "HTTP"
   vpc_id      = var.vpc_id
   target_type = "ip"
 
   health_check {
-    # CORRECCIÓN: Paths nativos de salud para Go, Python y NestJS
     path                = each.value == "ui" ? "/" : "/health"
     healthy_threshold   = 3
     unhealthy_threshold = 3
@@ -104,17 +110,14 @@ resource "aws_lb_listener_rule" "routing" {
   }
 }
 
-# 8. Definición de Tareas y Servicios de ECS Fargate
+# 8. Definición de Tareas y Servicios de ECS Fargate para las Apps Web
 resource "aws_ecs_task_definition" "app" {
   for_each                 = toset(var.services)
   family                   = "retail-${each.value}"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-
-  # Optimización paramétrica de recursos
-  cpu    = (each.value == "admin" || each.value == "checkout") ? "512" : "256"
-  memory = (each.value == "admin" || each.value == "checkout") ? "1024" : "512"
-
+  cpu                      = (each.value == "admin" || each.value == "checkout") ? "512" : "256"
+  memory                   = (each.value == "admin" || each.value == "checkout") ? "1024" : "512"
   execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
   task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
 
@@ -125,7 +128,6 @@ resource "aws_ecs_task_definition" "app" {
       essential = true
       portMappings = [
         {
-          # CORRECCIÓN: Los contenedores abren sus puertos verdaderos del README
           containerPort = each.value == "admin" ? 8081 : 8080
           hostPort      = each.value == "admin" ? 8081 : 8080
         }
@@ -133,21 +135,29 @@ resource "aws_ecs_task_definition" "app" {
       
       memoryReservation = (each.value == "admin" || each.value == "checkout") ? 768 : 256
 
-      # CORRECCIÓN: Nombres exactos de variables del README
       environment = [
-        # Variables requeridas por la UI
         { name = "RETAIL_UI_ENDPOINTS_CATALOG", value = "http://${aws_lb.main.dns_name}/api/catalog" },
         { name = "RETAIL_UI_ENDPOINTS_CARTS", value = "http://${aws_lb.main.dns_name}/api/carts" },
         { name = "RETAIL_UI_ENDPOINTS_CHECKOUT", value = "http://${aws_lb.main.dns_name}/api/checkout" },
         { name = "RETAIL_UI_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" },
         
-        # Variables requeridas por el Checkout
         { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" },
         { name = "RETAIL_CHECKOUT_PERSISTENCE_PROVIDER", value = "redis" },
-        
-        # Variables base comunes para persistencia de datos (Apunta local o a tu capa DB si corresponde)
+        { name = "RETAIL_CHECKOUT_REDIS_ADDRESS", value = "retail-redis.local:6379" },
+
         { name = "RETAIL_CATALOG_PERSISTENCE_PROVIDER", value = "postgres" },
-        { name = "DB_PASSWORD", value = "retailpassword" }
+        { name = "RETAIL_CATALOG_POSTGRES_ADDRESS", value = "retail-db.local:5432" },
+        { name = "RETAIL_CATALOG_POSTGRES_DATABASE", value = "retail" },
+        { name = "RETAIL_CATALOG_POSTGRES_USERNAME", value = "retailuser" },
+        { name = "RETAIL_CATALOG_POSTGRES_PASSWORD", value = var.db_password },
+
+        { name = "RETAIL_ORDERS_PERSISTENCE_PROVIDER", value = "postgres" },
+        { name = "RETAIL_ORDERS_POSTGRES_ADDRESS", value = "retail-db.local:5432" },
+        { name = "RETAIL_ORDERS_POSTGRES_DATABASE", value = "retail" },
+        { name = "RETAIL_ORDERS_POSTGRES_USERNAME", value = "retailuser" },
+        { name = "RETAIL_ORDERS_POSTGRES_PASSWORD", value = var.db_password },
+        
+        { name = "DB_PASSWORD", value = var.db_password }
       ]
     }
   ])
@@ -170,11 +180,97 @@ resource "aws_ecs_service" "app" {
   load_balancer {
     target_group_arn = aws_lb_target_group.targets[each.value].arn
     container_name   = "retail-${each.value}"
-    # CORRECCIÓN: El balanceador se acopla dinámicamente al puerto correcto de cada contenedor
     container_port   = each.value == "admin" ? 8081 : 8080
   }
 
   depends_on = [aws_lb_listener.http]
+}
+
+# =========================================================================
+# CAPA DE PERSISTENCIA: RETAIL-DB (PostgreSQL)
+# =========================================================================
+resource "aws_ecs_task_definition" "db" {
+  family                   = "retail-db"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
+  task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
+
+  container_definitions = jsonencode([
+    {
+      name      = "retail-db"
+      image     = "${var.repository_urls["db"]}:latest"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 5432
+          hostPort      = 5432
+        }
+      ]
+      environment = [
+        { name = "POSTGRES_DB", value = "retail" },
+        { name = "POSTGRES_USER", value = "retailuser" },
+        { name = "POSTGRES_PASSWORD", value = var.db_password }
+      ]
+    }
+  ])
+}
+
+resource "aws_ecs_service" "db" {
+  name            = "retail-db"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.db.family
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = [var.private_subnet_id]
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = true
+  }
+}
+
+# =========================================================================
+# CAPA DE PERSISTENCIA: RETAIL-REDIS
+# =========================================================================
+resource "aws_ecs_task_definition" "redis" {
+  family                   = "retail-redis"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = "arn:aws:iam::914465196685:role/LabRole"
+  task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
+
+  container_definitions = jsonencode([
+    {
+      name      = "retail-redis"
+      image     = "redis:7-alpine"
+      essential = true
+      portMappings = [
+        {
+          containerPort = 6379
+          hostPort      = 6379
+        }
+      ]
+    }
+  ])
+}
+
+resource "aws_ecs_service" "redis" {
+  name            = "retail-redis"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.redis.family
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = [var.private_subnet_id]
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = true
+  }
 }
 
 output "alb_dns_name" {
