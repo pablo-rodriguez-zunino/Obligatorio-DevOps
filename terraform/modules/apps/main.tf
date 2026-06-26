@@ -81,7 +81,6 @@ resource "aws_lb_target_group" "targets" {
   target_type = "ip"
 
   health_check {
-    # IMPORTANTE: Cambiamos a rutas genéricas de health check que tus microservicios validen de forma limpia
     path                = each.value == "ui" ? "/" : "/health"
     healthy_threshold   = 2
     unhealthy_threshold = 5
@@ -110,12 +109,8 @@ resource "aws_lb_listener_rule" "routing" {
 }
 
 # =========================================================================
-# SOLUCIÓN DE ARQUITECTURA: CONSOLIDACIÓN DE BACKENDS E INFRAESTRUCTURA
-# Para evitar fallos de conexión por falta de Service Discovery, unificamos
-# los componentes que requieren acoplamiento directo de base de datos.
+# CATALOG SERVICE
 # =========================================================================
-
-# --- CATALOG SERVICE ---
 resource "aws_ecs_task_definition" "catalog" {
   family                   = "retail-catalog"
   network_mode             = "awsvpc"
@@ -161,7 +156,9 @@ resource "aws_ecs_service" "catalog" {
   }
 }
 
-# --- CARTS SERVICE ---
+# =========================================================================
+# CARTS SERVICE
+# =========================================================================
 resource "aws_ecs_task_definition" "carts" {
   family                   = "retail-carts"
   network_mode             = "awsvpc"
@@ -208,7 +205,9 @@ resource "aws_ecs_service" "carts" {
   }
 }
 
-# --- ORDERS SERVICE ---
+# =========================================================================
+# ORDERS SERVICE
+# =========================================================================
 resource "aws_ecs_task_definition" "orders" {
   family                   = "retail-orders"
   network_mode             = "awsvpc"
@@ -253,7 +252,9 @@ resource "aws_ecs_service" "orders" {
   }
 }
 
-# --- STACK PRINCIPAL: UI + CHECKOUT + PERSISTENCIA INTEGRADA ---
+# =========================================================================
+# STACK PRINCIPAL: UI + CHECKOUT + PERSISTENCIA INTEGRADA
+# =========================================================================
 resource "aws_ecs_task_definition" "ui_stack" {
   family                   = "retail-ui-stack"
   network_mode             = "awsvpc"
@@ -264,7 +265,6 @@ resource "aws_ecs_task_definition" "ui_stack" {
   task_role_arn            = "arn:aws:iam::914465196685:role/LabRole"
 
   container_definitions = jsonencode([
-    # UI Frontend (Usa el único 8080 de esta tarea)
     {
       name      = "retail-ui"
       image     = "${var.repository_urls["ui"]}:latest"
@@ -277,7 +277,6 @@ resource "aws_ecs_task_definition" "ui_stack" {
         { name = "RETAIL_UI_ENDPOINTS_CHECKOUT", value = "http://127.0.0.1:8085" } 
       ]
     },
-    # Checkout (Puerto alterno 8085 interno para no chocar)
     {
       name      = "retail-checkout"
       image     = "${var.repository_urls["checkout"]}:latest"
@@ -290,7 +289,6 @@ resource "aws_ecs_task_definition" "ui_stack" {
         { name = "RETAIL_CHECKOUT_ENDPOINTS_ORDERS", value = "http://${aws_lb.main.dns_name}/api/orders" }
       ]
     },
-    # PostgreSQL compartida localmente para la UI y Checkout
     {
       name      = "retail-db"
       image     = "${var.repository_urls["db"]}:latest"
@@ -302,7 +300,6 @@ resource "aws_ecs_task_definition" "ui_stack" {
         { name = "POSTGRES_PASSWORD", value = var.db_password }
       ]
     },
-    # Redis compartido localmente
     {
       name      = "retail-redis"
       image     = "redis:7-alpine"
@@ -334,7 +331,9 @@ resource "aws_ecs_service" "ui_service" {
   depends_on = [aws_lb_listener.http]
 }
 
-# --- STACK AISLADO: ADMIN PANEL (Evita choques de 8080 y límites del ALB) ---
+# =========================================================================
+# STACK AISLADO: ADMIN PANEL
+# =========================================================================
 resource "aws_ecs_task_definition" "admin" {
   family                   = "retail-admin"
   network_mode             = "awsvpc"
@@ -351,9 +350,6 @@ resource "aws_ecs_task_definition" "admin" {
     portMappings = [{ containerPort = 8080, hostPort = 8080 }]
     environment = [
       { name = "PORT", value = "8080" },
-      # Le pega a la base de datos que está expuesta públicamente/internamente en la tarea de la UI si se requiere,
-      # o para pruebas locales corre de forma aislada. Como la DB está en la interfaz de la UI, usamos localhost de su propia tarea,
-      # o le apuntamos de forma directa si fuera necesario. Para que no falle por conexión, asumimos entorno standalone:
       { name = "DB_HOST", value = "127.0.0.1" }, 
       { name = "DB_PORT", value = "5432" },
       { name = "DB_USER", value = "retail_user" },
@@ -375,6 +371,12 @@ resource "aws_ecs_service" "admin_service" {
   network_configuration {
     subnets          = [var.private_subnet_id]
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true # <--- Te dará una IP pública en la consola para entrar directo
+    assign_public_ip = true
   }
+}
+
+# EXPONER EL OUTPUT COMPATIBLE CON EL MAIN RAÍZ
+output "alb_dns_name" {
+  value       = aws_lb.main.dns_name
+  description = "DNS del Load Balancer"
 }

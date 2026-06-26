@@ -26,7 +26,8 @@ module "networking" {
 module "ecr" {
   source = "./modules/ecr"
 }
-# ◄ ADICIÓN: Conectamos el módulo de aplicaciones con la red y el ECR
+
+# Conectamos el módulo de aplicaciones con la red y el ECR
 module "apps" {
   source            = "./modules/apps"
   environment       = var.environment
