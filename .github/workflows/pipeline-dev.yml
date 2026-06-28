@@ -189,16 +189,17 @@ jobs:
           echo "URL del ambiente detectada: http://$ALB_DNS"
           echo "APP_URL=http://$ALB_DNS" >> $GITHUB_ENV
 
-      - name: Instalar y Ejecutar k6 de forma Nativa
+      - name: Descargar y Ejecutar k6 Binario Directo
         run: |
-          # 1. Descargar e instalar el binario oficial de k6 en Ubuntu
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.get-k6.list
-          sudo apt-get update
-          sudo apt-get install k6 -y
-
-          # 2. Correr la prueba usando tu archivo exacto
+          echo "Descargando k6 oficial de forma directa..."
+          # Descargamos el binario precompilado para Linux de 64 bits
+          curl -L -o k6.tar.gz https://github.com/grafana/k6/releases/download/v0.51.0/k6-v0.51.0-linux-amd64.tar.gz
+          
+          echo "Descomprimiendo binario..."
+          tar -xzf k6.tar.gz
+          
           echo "Ejecutando test sobre: $APP_URL"
-          k6 run tests/test.js
+          # Ejecutamos k6 apuntando a la carpeta extraída usando tu archivo tests/test.js
+          ./k6-v0.51.0-linux-amd64/k6 run tests/test.js
         env:
           APP_URL: ${{ env.APP_URL }}
