@@ -177,15 +177,13 @@ jobs:
       - name: Extraer URL Pública del Balanceador (ALB)
         id: get_alb_url
         run: |
-          cd terraform
-          terraform init -reconfigure
-          # Intentamos leer el endpoint público usando los outputs de tu stack
-          ALB_DNS=$(terraform output -raw alb_dns_name 2>/dev/null || terraform output -raw alb_dns || echo "none")
+          echo "Buscando DNS del ALB mediante AWS CLI..."
+          # Le pedimos directo a AWS el DNS del balanceador que contenga la palabra 'retail'
+          ALB_DNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'retail')].DNSName" --output text)
           
-          # Si por alguna razón no tenés el output configurado, usamos un fallback inteligente con AWS CLI
-          if [ "$ALB_DNS" = "none" ] || [ -z "$ALB_DNS" ]; then
-            echo "Buscando DNS del ALB mediante AWS CLI..."
-            ALB_DNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'retail')].DNSName" --output text)
+          if [ -z "$ALB_DNS" ] || [ "$ALB_DNS" = "None" ]; then
+            echo "Error: No se encontró ningún ALB con el nombre 'retail'"
+            exit 1
           fi
           
           echo "URL del ambiente detectada: http://$ALB_DNS"
