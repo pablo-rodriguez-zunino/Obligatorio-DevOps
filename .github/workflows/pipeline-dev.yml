@@ -192,14 +192,35 @@ jobs:
       - name: Descargar y Ejecutar k6 Binario Directo
         run: |
           echo "Descargando k6 oficial de forma directa..."
-          # Descargamos el binario precompilado para Linux de 64 bits
           curl -L -o k6.tar.gz https://github.com/grafana/k6/releases/download/v0.51.0/k6-v0.51.0-linux-amd64.tar.gz
           
           echo "Descomprimiendo binario..."
           tar -xzf k6.tar.gz
           
+          echo "Creando script de prueba en tiempo de ejecución..."
+          cat << 'EOF' > pipeline_smoke_test.js
+          import http from 'k6/http';
+          import { check, sleep } from 'k6';
+
+          export const options = {
+            vus: 3,
+            duration: '10s',
+            thresholds: {
+              http_req_failed: ['rate<0.01'],
+            },
+          };
+
+          export default function () {
+            const url = __ENV.APP_URL || 'http://localhost';
+            const res = http.get(url);
+            check(res, {
+              'status es 200': (r) => r.status === 200,
+            });
+            sleep(1);
+          }
+          EOF
+          
           echo "Ejecutando test sobre: $APP_URL"
-          # Ejecutamos k6 apuntando a la carpeta extraída usando tu archivo tests/test.js
-          ./k6-v0.51.0-linux-amd64/k6 run tests/test.js
+          ./k6-v0.51.0-linux-amd64/k6 run pipeline_smoke_test.js
         env:
           APP_URL: ${{ env.APP_URL }}
