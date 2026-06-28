@@ -191,9 +191,16 @@ jobs:
           echo "URL del ambiente detectada: http://$ALB_DNS"
           echo "APP_URL=http://$ALB_DNS" >> $GITHUB_ENV
 
-      - name: Run k6 Smoke Test
-        uses: grafana/k6-action@v1.0.1
-        with:
-          filename: tests/test.js  # ◄ Cambiado a tests/test.js para que use tu archivo exacto
+      - name: Instalar y Ejecutar k6 de forma Nativa
+        run: |
+          # 1. Descargar e instalar el binario oficial de k6 en Ubuntu
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.get-k6.list
+          sudo apt-get update
+          sudo apt-get install k6 -y
+
+          # 2. Correr la prueba usando tu archivo exacto
+          echo "Ejecutando test sobre: $APP_URL"
+          k6 run tests/test.js
         env:
           APP_URL: ${{ env.APP_URL }}
