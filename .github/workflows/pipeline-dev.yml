@@ -29,7 +29,7 @@ jobs:
         uses: SonarSource/sonarcloud-github-action@master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          遊_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # =========================================================================
   # ETAPA 2: INFRAESTRUCTURA (Terraform con -reconfigure por Reset)
@@ -147,3 +147,53 @@ jobs:
           
           echo "Forzando despliegue de ${{ matrix.service }} en el servicio ECS $SERVICE_NAME..."
           aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --force-new-deployment || echo "Aviso: El servicio $SERVICE_NAME aún no está listo o procesando."
+
+  # =========================================================================
+  # SECCIÓN 4: TESTING DE RENDIMIENTO SUPERFICIAL (k6 Smoke Test)
+  # =========================================================================
+  smoke-testing:
+    name: Execute k6 Smoke Test
+    needs: deploy-dev  # ◄ Se ejecuta solo cuando todos los contenedores terminaron de subir y recargar
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.0"
+
+      - name: Extraer URL Pública del Balanceador (ALB)
+        id: get_alb_url
+        run: |
+          cd terraform
+          terraform init -reconfigure
+          # Intentamos leer el endpoint público usando los outputs de tu stack
+          ALB_DNS=$(terraform output -raw alb_dns_name 2>/dev/null || terraform output -raw alb_dns || echo "none")
+          
+          # Si por alguna razón no tenés el output configurado, usamos un fallback inteligente con AWS CLI
+          if [ "$ALB_DNS" = "none" ] || [ -z "$ALB_DNS" ]; then
+            echo "Buscando DNS del ALB mediante AWS CLI..."
+            ALB_DNS=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?contains(LoadBalancerName, 'retail')].DNSName" --output text)
+          fi
+          
+          echo "URL del ambiente detectada: http://$ALB_DNS"
+          echo "APP_URL=http://$ALB_DNS" >> $GITHUB_ENV
+
+      - name: Run k6 Smoke Test
+        uses: grafana/k6-action@v1
+        with:
+          filename: tests/test.js  # ◄ Cambiado a tests/test.js para que use tu archivo exacto
+        env:
+          APP_URL: ${{ env.APP_URL }}
